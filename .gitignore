@@ -1,0 +1,76 @@
+# Binaries
+codegateway
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Logs
+*.log
+logs/
+
+# Node - Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Build artifacts
+dist/
+build/
+output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Coverage
+coverage/
+*.cover
+
+# JetBrains
+.idea/
+
+# VS Code
+.vscode/
+
+# GoLand
+*.iml
