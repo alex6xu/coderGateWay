@@ -1,0 +1,99 @@
+# CodeGateway Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  mode: "debug"
+
+database:
+  driver: "sqlite"
+  dsn: "./data/codegateway.db"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+agent:
+  default_model: "gpt-4o"
+  max_iterations: 50
+  max_tokens: 128000
+  temperature: 0.7
+  
+  memory:
+    enabled: true
+    reconcile_on_search: true
+    score_floor: 0.15
+  
+  skills:
+    builtin_path: "./skills"
+    custom_path: "~/.codegateway/skills"
+  
+  cron:
+    enabled: true
+    tick_interval: "1m"
+
+gateway:
+  enabled: true
+  
+  routing:
+    strategy: "auto"
+    fallback_enabled: true
+    retry_count: 3
+  
+  free_proxies:
+    - name: "free-openai"
+      base_url: "https://api.free-openai.com"
+      models: ["gpt-4", "gpt-3.5-turbo", "gpt-4o"]
+      rate_limit: 100
+    
+    - name: "free-claude"
+      base_url: "https://api.free-claude.com"
+      models: ["claude-3-sonnet", "claude-3-opus"]
+      rate_limit: 50
+    
+    - name: "free-gemini"
+      base_url: "https://api.free-gemini.com"
+      models: ["gemini-pro", "gemini-ultra"]
+      rate_limit: 80
+    
+    - name: "free-deepseek"
+      base_url: "https://api.free-deepseek.com"
+      models: ["deepseek-v3", "deepseek-r1"]
+      rate_limit: 120
+
+platforms:
+  telegram:
+    enabled: false
+    bot_token: ""
+  
+  web:
+    enabled: true
+    cors_origins: ["*"]
+  
+  terminal:
+    enabled: true
+  
+  wechat:
+    enabled: false
+    app_id: ""
+    app_secret: ""
+    token: ""
+
+billing:
+  enabled: true
+  currency: "USD"
+  
+  pricing:
+    gpt-4o:
+      input: 2.5
+      output: 10
+    claude-3-5-sonnet:
+      input: 3
+      output: 15
+    deepseek-v3:
+      input: 0.14
+      output: 0.28
+    gemini-pro:
+      input: 0.5
+      output: 1.5
