@@ -34,8 +34,12 @@ func Run() error {
 	// Setup Gin router
 	r := gin.Default()
 
+	// Create WebSocket hub
+	hub := newWSHub()
+	go hub.run()
+
 	// Setup routes
-	setupRoutes(r, database, cfg)
+	setupRoutes(r, database, cfg, hub)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -56,11 +60,30 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub) {
+	// CORS middleware
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Header("Access-Control-Allow-Credentials", "true")
+		// CSP header for development
+		c.Header("Content-Security-Policy", "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
+		
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
+
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// WebSocket endpoint
+	r.GET("/ws", handleWebSocket(database, cfg, hub))
 
 	// API v1
 	v1 := r.Group("/v1")
@@ -84,6 +107,8 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config) {
 		// Admin endpoints
 		admin := v1.Group("/admin")
 		{
+			admin.GET("/stats", handleGetStats(database))
+
 			admin.GET("/channels", handleListChannels(database))
 			admin.POST("/channels", handleCreateChannel(database))
 			admin.PUT("/channels/:id", handleUpdateChannel(database))

@@ -15,5 +15,9 @@ export default defineConfig({
         ws: true,
       },
     },
+    // Fix CSP issue for development
+    headers: {
+      'Content-Security-Policy': "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    },
   },
 })

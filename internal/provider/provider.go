@@ -120,6 +120,7 @@ const (
 	ProviderTypeGemini   ProviderType = "gemini"
 	ProviderTypeDeepSeek ProviderType = "deepseek"
 	ProviderTypeOllama   ProviderType = "ollama"
+	ProviderTypeMiMo     ProviderType = "mimo"
 	ProviderTypeCustom   ProviderType = "custom"
 )
 
@@ -161,6 +162,8 @@ func (r *Registry) Register(config *ProviderConfig) error {
 		provider = NewDeepSeekProvider(config)
 	case ProviderTypeOllama:
 		provider = NewOllamaProvider(config)
+	case ProviderTypeMiMo:
+		provider = NewOpenAIProvider(config) // MiMo uses OpenAI compatible API
 	case ProviderTypeCustom:
 		provider = NewCustomProvider(config)
 	default:

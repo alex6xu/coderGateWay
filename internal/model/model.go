@@ -127,6 +127,7 @@ const (
 	ChannelTypeGemini   = 3
 	ChannelTypeDeepSeek = 4
 	ChannelTypeOllama   = 5
+	ChannelTypeMiMo     = 6
 	ChannelTypeCustom   = 99
 )
 
