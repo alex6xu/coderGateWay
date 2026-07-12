@@ -149,31 +149,37 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register registers a provider
-func (r *Registry) Register(config *ProviderConfig) error {
-	var provider Provider
-
+// NewProvider creates a provider from configuration.
+func NewProvider(config *ProviderConfig) (Provider, error) {
 	switch config.Type {
 	case ProviderTypeOpenAI:
-		provider = NewOpenAIProvider(config)
+		return NewOpenAIProvider(config), nil
 	case ProviderTypeClaude:
-		provider = NewClaudeProvider(config)
+		return NewClaudeProvider(config), nil
 	case ProviderTypeGemini:
-		provider = NewGeminiProvider(config)
+		return NewGeminiProvider(config), nil
 	case ProviderTypeDeepSeek:
-		provider = NewDeepSeekProvider(config)
+		return NewDeepSeekProvider(config), nil
 	case ProviderTypeOllama:
-		provider = NewOllamaProvider(config)
+		return NewOllamaProvider(config), nil
 	case ProviderTypeMiMo:
-		provider = NewOpenAIProvider(config) // MiMo uses OpenAI compatible API
+		return NewOpenAIProvider(config), nil
 	case ProviderTypeMiMoFree:
-		provider = NewMiMoFreeProvider(config) // MiMo free tier with special headers
+		return NewMiMoFreeProvider(config), nil
 	case ProviderTypeMiMoCode:
-		provider = NewMiMoCodeProvider(config) // MiMoCode session API
+		return NewMiMoCodeProvider(config), nil
 	case ProviderTypeCustom:
-		provider = NewCustomProvider(config)
+		return NewCustomProvider(config), nil
 	default:
-		return fmt.Errorf("unsupported provider type: %s", config.Type)
+		return nil, fmt.Errorf("unsupported provider type: %s", config.Type)
+	}
+}
+
+// Register registers a provider
+func (r *Registry) Register(config *ProviderConfig) error {
+	provider, err := NewProvider(config)
+	if err != nil {
+		return err
 	}
 
 	r.providers[config.Name] = provider

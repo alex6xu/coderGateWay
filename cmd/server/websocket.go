@@ -135,6 +135,7 @@ func (c *WSClient) readPump(database *db.DB, cfg *config.Config, hub *WSHub) {
 		}
 
 		// Process message and get response
+		log.Printf("[chat/ws] recv session=%s bytes=%d", c.sessionID, len(msg.Content))
 		response := processMessage(database, cfg, c.sessionID, msg.Content)
 
 		// Send response

@@ -119,7 +119,7 @@ export default function ChannelsPage() {
     3: 'https://generativelanguage.googleapis.com/v1beta',
     4: 'https://api.deepseek.com/v1',
     6: 'https://api.xiaomimimo.com/v1',
-    7: 'https://api.xiaomimimo.com/v1',
+    7: 'https://api.xiaomimimo.com',
     8: 'http://127.0.0.1:10001',
   }
 
@@ -182,8 +182,8 @@ export default function ChannelsPage() {
                   <option value={4}>DeepSeek</option>
                   <option value={5}>Ollama</option>
                   <option value={6}>MiMo (API)</option>
-                  <option value={7}>MiMo Free (无需Key)</option>
-                  <option value={8}>MiMoCode</option>
+                  <option value={7}>MiMo Free (mimo-auto 直连)</option>
+                  <option value={8}>MiMoCode (本地 mimo serve)</option>
                   <option value={99}>Custom</option>
                 </select>
               </div>

@@ -1,261 +1,422 @@
 package provider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
-// MiMoFreeProvider implements the Provider interface for MiMo free tier
+const (
+	mimoFreeDefaultBase = "https://api.xiaomimimo.com"
+	mimoFreeBootstrap   = "/api/free-ai/bootstrap"
+	mimoFreeChatPath    = "/api/free-ai/openai/chat"
+	mimoFreeModel       = "mimo-auto"
+	mimoFreeTokenSkew   = 5 * time.Minute
+	mimoFreeUserAgent   = "mimocode/0.1.5"
+)
+
+// MiMoCodeSystemMarker is required by the free mimo-auto endpoint anti-abuse gate.
+const MiMoCodeSystemMarker = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks."
+
+// MiMoFreeProvider implements the anonymous free mimo-auto flow from MiMoCode.
 type MiMoFreeProvider struct {
 	config *ProviderConfig
 	client *http.Client
+
+	mu    sync.Mutex
+	token *mimoFreeToken
 }
 
-// NewMiMoFreeProvider creates a new MiMo free provider
+type mimoFreeToken struct {
+	jwt string
+	exp time.Time
+}
+
+// NewMiMoFreeProvider creates a new MiMo free provider.
 func NewMiMoFreeProvider(config *ProviderConfig) *MiMoFreeProvider {
 	return &MiMoFreeProvider{
 		config: config,
-		client: &http.Client{Timeout: 120 * time.Second},
+		client: &http.Client{Timeout: 180 * time.Second},
 	}
 }
 
-// Name returns the provider name
 func (p *MiMoFreeProvider) Name() string {
 	return p.config.Name
 }
 
-// ChatCompletion sends a chat completion request
-func (p *MiMoFreeProvider) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	// Check if API key is set
-	if p.config.APIKey == "" {
-		return nil, fmt.Errorf("MiMo API Key is required. Get your free key at: https://platform.xiaomimimo.com")
+func (p *MiMoFreeProvider) baseURL() string {
+	raw := mimoFreeDefaultBase
+	if p.config.BaseURL != "" {
+		raw = p.config.BaseURL
+	} else if v := os.Getenv("MIMO_FREE_BASE_URL"); v != "" {
+		raw = v
 	}
+	return normalizeMiMoFreeBaseURL(raw)
+}
 
-	// Set stream to false
-	req.Stream = false
+func normalizeMiMoFreeBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	base = strings.TrimSuffix(base, "/v1")
+	return base
+}
 
-	// Make request
-	body, err := json.Marshal(req)
+func (p *MiMoFreeProvider) chatURL() string {
+	return p.baseURL() + mimoFreeChatPath
+}
+
+func (p *MiMoFreeProvider) bootstrapURL() string {
+	return p.baseURL() + mimoFreeBootstrap
+}
+
+func (p *MiMoFreeProvider) fingerprintPath() string {
+	if v := os.Getenv("MIMO_FREE_FINGERPRINT_PATH"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return filepath.Join("./data", "mimo-free-client")
+	}
+	return filepath.Join(home, ".local", "share", "mimocode", "mimo-free-client")
+}
+
+func (p *MiMoFreeProvider) fingerprint() (string, error) {
+	path := p.fingerprintPath()
+	if data, err := os.ReadFile(path); err == nil {
+		if fp := strings.TrimSpace(string(data)); fp != "" {
+			return fp, nil
+		}
 	}
 
-	url := fmt.Sprintf("%s/chat/completions", p.config.BaseURL)
-	
-	// Log request details
-	log.Printf("[MiMoFree] ========== REQUEST ==========")
-	log.Printf("[MiMoFree] URL: %s", url)
-	log.Printf("[MiMoFree] Method: POST")
-	log.Printf("[MiMoFree] Request Body: %s", string(body))
-	
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	hostname, _ := os.Hostname()
+	cpuModel := "unknown-cpu"
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+			if v := strings.TrimSpace(string(out)); v != "" {
+				cpuModel = v
+			}
+		}
+	} else if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "model name") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					cpuModel = strings.TrimSpace(parts[1])
+					break
+				}
+			}
+		}
+	}
+
+	platform := runtime.GOOS
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x64"
+	case "386":
+		arch = "x86"
+	}
+
+	username := "unknown-user"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		username = u.Username
+	}
+
+	payload := strings.Join([]string{hostname, platform, arch, cpuModel, username}, "|")
+	sum := sha256.Sum256([]byte(payload))
+	fp := hex.EncodeToString(sum[:])
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err == nil {
+		_ = os.WriteFile(path, []byte(fp), 0o600)
+	}
+
+	return fp, nil
+}
+
+func jwtExpiry(jwt string) time.Time {
+	parts := strings.Split(jwt, ".")
+	if len(parts) < 2 {
+		return time.Now().Add(50 * time.Minute)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return time.Now().Add(50 * time.Minute)
 	}
-
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
-	httpReq.Header.Set("X-Mimo-Source", "mimocode-cli")
-	httpReq.Header.Set("User-Agent", "mimocode-cli/1.0")
-
-	// Log headers
-	log.Printf("[MiMoFree] Request Headers:")
-	for key, values := range httpReq.Header {
-		log.Printf("[MiMoFree]   %s: %s", key, strings.Join(values, ", "))
+	var claims struct {
+		Exp int64 `json:"exp"`
 	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Now().Add(50 * time.Minute)
+	}
+	return time.Unix(claims.Exp, 0)
+}
 
-	resp, err := p.client.Do(httpReq)
+func (p *MiMoFreeProvider) bootstrap(ctx context.Context) (*mimoFreeToken, error) {
+	fp, err := p.fingerprint()
 	if err != nil {
-		log.Printf("[MiMoFree] Request Error: %v", err)
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("fingerprint: %w", err)
+	}
+
+	body, err := json.Marshal(map[string]string{"client": fp})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.bootstrapURL(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Log response details
-	log.Printf("[MiMoFree] ========== RESPONSE ==========")
-	log.Printf("[MiMoFree] Status: %d %s", resp.StatusCode, resp.Status)
-	log.Printf("[MiMoFree] Response Headers:")
-	for key, values := range resp.Header {
-		log.Printf("[MiMoFree]   %s: %s", key, strings.Join(values, ", "))
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bootstrap failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	// Read response body
+	log.Printf("[mimo-free] bootstrap ok url=%s fingerprint=%s…%s", p.bootstrapURL(), fp[:8], fp[len(fp)-4:])
+
+	var result struct {
+		JWT string `json:"jwt"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if result.JWT == "" {
+		return nil, fmt.Errorf("bootstrap response missing jwt")
+	}
+
+	return &mimoFreeToken{jwt: result.JWT, exp: jwtExpiry(result.JWT)}, nil
+}
+
+func (p *MiMoFreeProvider) getJWT(ctx context.Context, force bool) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !force && p.token != nil && time.Until(p.token.exp) > mimoFreeTokenSkew {
+		return p.token.jwt, nil
+	}
+
+	token, err := p.bootstrap(ctx)
+	if err != nil {
+		return "", err
+	}
+	p.token = token
+	return token.jwt, nil
+}
+
+func (p *MiMoFreeProvider) prepareRequest(req *ChatCompletionRequest) *ChatCompletionRequest {
+	out := *req
+	out.Model = mimoFreeModel
+	out.Messages = injectMiMoCodeSystemMarker(req.Messages)
+	return &out
+}
+
+func injectMiMoCodeSystemMarker(messages []Message) []Message {
+	marker := MiMoCodeSystemMarker
+	for _, msg := range messages {
+		if msg.Role == "system" && strings.Contains(msg.Content, "You are MiMoCode") {
+			return messages
+		}
+	}
+
+	out := make([]Message, 0, len(messages)+1)
+	for i, msg := range messages {
+		if msg.Role == "system" {
+			merged := msg
+			if !strings.Contains(merged.Content, marker) {
+				merged.Content = marker + "\n\n" + merged.Content
+			}
+			out = append(out, merged)
+			out = append(out, messages[i+1:]...)
+			return out
+		}
+	}
+
+	out = append(out, Message{Role: "system", Content: marker})
+	out = append(out, messages...)
+	return out
+}
+
+func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionRequest, stream bool) (*http.Response, error) {
+	prepared := p.prepareRequest(req)
+	prepared.Stream = stream
+
+	body, err := json.Marshal(prepared)
+	if err != nil {
+		return nil, err
+	}
+
+	jwt, err := p.getJWT(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mimo-auto token: %w", err)
+	}
+
+	resp, err := p.sendChat(ctx, body, jwt)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return resp, nil
+	}
+	resp.Body.Close()
+
+	jwt, err = p.getJWT(ctx, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh mimo-auto token: %w", err)
+	}
+	return p.sendChat(ctx, body, jwt)
+}
+
+func (p *MiMoFreeProvider) sendChat(ctx context.Context, body []byte, jwt string) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.chatURL(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+jwt)
+	httpReq.Header.Set("X-Mimo-Source", "mimocode-cli-free")
+	httpReq.Header.Set("User-Agent", mimoFreeUserAgent)
+	if strings.Contains(string(body), `"stream":true`) {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+	log.Printf("[mimo-free] chat request url=%s stream=%v", p.chatURL(), strings.Contains(string(body), `"stream":true`))
+	return p.client.Do(httpReq)
+}
+
+func (p *MiMoFreeProvider) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	resp, err := p.doChat(ctx, req, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("[MiMoFree] Failed to read response body: %v", err)
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, err
 	}
-	log.Printf("[MiMoFree] Response Body: %s", string(bodyBytes))
-
 	if resp.StatusCode != http.StatusOK {
-		// Provide helpful error message for 401
-		if resp.StatusCode == 401 {
-			return nil, fmt.Errorf("MiMo API Key is invalid or expired. Get a new key at: https://platform.xiaomimimo.com")
-		}
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("mimo-auto API error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
+	log.Printf("[mimo-free] chat ok status=%d bytes=%d", resp.StatusCode, len(bodyBytes))
 
 	var result ChatCompletionResponse
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		log.Printf("[MiMoFree] Failed to decode response: %v", err)
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-
-	log.Printf("[MiMoFree] ========== SUCCESS ==========")
 	return &result, nil
 }
 
-// ChatCompletionStream sends a streaming chat completion request
 func (p *MiMoFreeProvider) ChatCompletionStream(ctx context.Context, req *ChatCompletionRequest) (<-chan *ChatCompletionChunk, error) {
-	// Check if API key is set
-	if p.config.APIKey == "" {
-		return nil, fmt.Errorf("MiMo API Key is required. Get your free key at: https://platform.xiaomimimo.com")
-	}
-
-	// Set stream to true
-	req.Stream = true
-
-	// Make request
-	body, err := json.Marshal(req)
+	resp, err := p.doChat(ctx, req, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, err
 	}
-
-	url := fmt.Sprintf("%s/chat/completions", p.config.BaseURL)
-	
-	// Log request details
-	log.Printf("[MiMoFree Stream] ========== REQUEST ==========")
-	log.Printf("[MiMoFree Stream] URL: %s", url)
-	log.Printf("[MiMoFree Stream] Method: POST")
-	log.Printf("[MiMoFree Stream] Request Body: %s", string(body))
-	
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
-	httpReq.Header.Set("X-Mimo-Source", "mimocode-cli")
-	httpReq.Header.Set("User-Agent", "mimocode-cli/1.0")
-
-	// Log headers
-	log.Printf("[MiMoFree Stream] Request Headers:")
-	for key, values := range httpReq.Header {
-		log.Printf("[MiMoFree Stream]   %s: %s", key, strings.Join(values, ", "))
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		log.Printf("[MiMoFree Stream] Request Error: %v", err)
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-
-	// Log response details
-	log.Printf("[MiMoFree Stream] ========== RESPONSE ==========")
-	log.Printf("[MiMoFree Stream] Status: %d %s", resp.StatusCode, resp.Status)
-	log.Printf("[MiMoFree Stream] Response Headers:")
-	for key, values := range resp.Header {
-		log.Printf("[MiMoFree Stream]   %s: %s", key, strings.Join(values, ", "))
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("[MiMoFree Stream] Error Response Body: %s", string(bodyBytes))
 		resp.Body.Close()
-		// Provide helpful error message for 401
-		if resp.StatusCode == 401 {
-			return nil, fmt.Errorf("MiMo API Key is invalid or expired. Get a new key at: https://platform.xiaomimimo.com")
-		}
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("mimo-auto API error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	chunks := make(chan *ChatCompletionChunk, 100)
+	chunks := make(chan *ChatCompletionChunk, 64)
 	go func() {
 		defer resp.Body.Close()
 		defer close(chunks)
 
-		buf := make([]byte, 0, 4096)
-		tmp := make([]byte, 1024)
-		for {
-			n, err := resp.Body.Read(tmp)
-			if n > 0 {
-				buf = append(buf, tmp[:n]...)
-				// Process complete lines
-				for {
-					idx := bytes.IndexByte(buf, '\n')
-					if idx < 0 {
-						break
-					}
-					line := string(buf[:idx])
-					buf = buf[idx+1:]
-					
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					if strings.HasPrefix(line, "data: ") {
-						data := strings.TrimPrefix(line, "data: ")
-						if data == "[DONE]" {
-							log.Printf("[MiMoFree Stream] Received [DONE]")
-							return
-						}
-						var chunk ChatCompletionChunk
-						if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-							log.Printf("[MiMoFree Stream] Failed to parse chunk: %v, data: %s", err, data)
-							continue
-						}
-						select {
-						case chunks <- &chunk:
-						case <-ctx.Done():
-							return
-						}
-					}
-				}
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || !strings.HasPrefix(line, "data: ") {
+				continue
 			}
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("[MiMoFree Stream] Read error: %v", err)
-				}
-				break
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				return
+			}
+			var chunk ChatCompletionChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+			select {
+			case chunks <- &chunk:
+			case <-ctx.Done():
+				return
 			}
 		}
-		log.Printf("[MiMoFree Stream] Stream ended")
 	}()
 
 	return chunks, nil
 }
 
-// ListModels returns available models
 func (p *MiMoFreeProvider) ListModels(ctx context.Context) ([]string, error) {
-	return []string{
-		"mimo-auto",
-		"mimo-v2.5-pro",
-		"mimo-v2.5",
-	}, nil
+	return MiMoFreeAdvertisedModels(), nil
 }
 
-// ValidateModel checks if a model is available
 func (p *MiMoFreeProvider) ValidateModel(model string) bool {
-	validModels := []string{
+	return IsMiMoAutoModel(model)
+}
+
+// MiMoFreeAdvertisedModels returns model IDs exposed via OpenAI-compatible /v1/models.
+func MiMoFreeAdvertisedModels() []string {
+	return []string{
 		"mimo-auto",
-		"mimo-v2.5-pro",
-		"mimo-v2.5",
+		"mimo/mimo-auto",
+		"mimo-free",
+		"gpt-4o",
+		"gpt-4o-mini",
+		"gpt-4",
+		"gpt-4-turbo",
+		"gpt-3.5-turbo",
+		"o1",
+		"o1-mini",
+		"o3-mini",
 	}
-	for _, m := range validModels {
-		if strings.EqualFold(m, model) {
-			return true
-		}
+}
+
+// NormalizeModelAlias normalizes model names for channel matching.
+func NormalizeModelAlias(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.HasPrefix(m, "mimo/") {
+		return strings.TrimPrefix(m, "mimo/")
 	}
-	return true // Allow any model
+	return m
+}
+
+// IsMiMoAutoModel reports whether a model name should route to mimo-auto.
+func IsMiMoAutoModel(model string) bool {
+	switch NormalizeModelAlias(model) {
+	case "mimo-auto", "mimo-free":
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeModelForMiMoAuto maps OpenAI-compatible model names to mimo-auto.
+func NormalizeModelForMiMoAuto(model string) string {
+	return mimoFreeModel
 }

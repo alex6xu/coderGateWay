@@ -91,10 +91,13 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 	// API v1
 	v1 := r.Group("/v1")
 	{
-		// Gateway endpoints
+		v1.POST("/chat/completions", handleChatCompletions(database, cfg))
+		v1.GET("/models", handleListModels(database))
+
 		gateway := v1.Group("/gateway")
 		{
 			gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
+			gateway.GET("/models", handleListModels(database))
 			gateway.POST("/messages", handleClaudeMessages(database, cfg))
 			gateway.POST("/v1beta/*path", handleGemini(database, cfg))
 		}
@@ -127,23 +130,18 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 }
 
 func initDefaultChannels(database *db.DB, cfg *config.Config) {
-	// Check if any channels exist
-	var count int
-	err := database.QueryRow("SELECT COUNT(*) FROM channels").Scan(&count)
-	if err != nil {
-		log.Printf("Failed to check channels: %v", err)
-		return
-	}
-
-	// If no channels exist, create default ones from config
-	if count > 0 {
-		return
-	}
-
-	log.Println("No channels found, creating default channels...")
-
 	for _, ch := range cfg.Gateway.DefaultChannels {
-		_, err := database.Exec(`
+		var exists int
+		err := database.QueryRow("SELECT COUNT(*) FROM channels WHERE name = ?", ch.Name).Scan(&exists)
+		if err != nil {
+			log.Printf("Failed to check channel %s: %v", ch.Name, err)
+			continue
+		}
+		if exists > 0 {
+			continue
+		}
+
+		_, err = database.Exec(`
 			INSERT INTO channels (name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'default', datetime('now'), datetime('now'))
 		`, ch.Name, ch.Type, ch.Key, ch.BaseURL, ch.Models, ch.Weight, ch.Priority)

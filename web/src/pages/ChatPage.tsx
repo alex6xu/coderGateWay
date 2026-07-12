@@ -111,8 +111,10 @@ export default function ChatPage() {
         
         // Check for API key error
         let content = data.response || data.error || 'No response'
-        if (content.includes('API Key is required') || content.includes('API Key is invalid')) {
-          content = '⚠️ ' + content + '\n\n请前往 https://platform.xiaomimimo.com 获取免费 API Key，然后在 Channels 页面配置。'
+        if (content.includes('MiMoCode backend') || content.includes('create session failed')) {
+          content = '⚠️ ' + content + '\n\n如需使用 MiMoCode 本地代理，请先启动：\n`mimo serve --hostname 127.0.0.1 --port 10001`\n默认免费通道（类型 7）无需本地服务，可直接调用 mimo-auto。'
+        } else if (content.includes('bootstrap failed') || content.includes('mimo-auto token') || content.includes('Illegal access')) {
+          content = '⚠️ ' + content + '\n\nMiMo Free 通道直连小米免费 API，请确认网络可访问 api.xiaomimimo.com，且 Channels 中存在类型 7 渠道。'
         }
         
         setMessages(prev => [...prev, {

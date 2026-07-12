@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alex/codegateway/internal/config"
@@ -52,7 +54,7 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 		var req struct {
 			Name         string `json:"name" binding:"required"`
 			Type         int    `json:"type" binding:"required"`
-			Key          string `json:"key" binding:"required"`
+			Key          string `json:"key"`
 			BaseURL      string `json:"base_url"`
 			Models       string `json:"models"`
 			Weight       int    `json:"weight"`
@@ -214,20 +216,14 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			return
 		}
 
-		// Create provider based on channel type
-		providerCfg := &provider.ProviderConfig{
-			Name:    channel.Name,
-			Type:    getProviderType(channel.Type),
-			BaseURL: channel.BaseURL,
-			APIKey:  channel.Key,
-		}
+		req.Model = resolveModelForChannel(channel, req.Model)
+		log.Printf("[chat] model=%s channel=%s(type=%d) stream=%v", req.Model, channel.Name, channel.Type, req.Stream)
 
-		// Set default base URL if empty
-		if providerCfg.BaseURL == "" {
-			providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
+		prov, err := createProviderFromChannel(channel)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-
-		prov := provider.NewOpenAIProvider(providerCfg)
 
 		// Handle streaming
 		if req.Stream {
@@ -279,6 +275,66 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 	flusher.Flush()
 }
 
+func handleListModels(database *db.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rows, err := database.Query(`
+			SELECT models, type FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC
+		`)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query channels"})
+			return
+		}
+		defer rows.Close()
+
+		seen := make(map[string]bool)
+		models := make([]map[string]interface{}, 0)
+
+		addModel := func(id string) {
+			if id == "" || seen[id] {
+				return
+			}
+			seen[id] = true
+			models = append(models, map[string]interface{}{
+				"id":       id,
+				"object":   "model",
+				"owned_by": "codegateway",
+			})
+		}
+
+		for rows.Next() {
+			var modelsJSON string
+			var chType int
+			if err := rows.Scan(&modelsJSON, &chType); err != nil {
+				continue
+			}
+
+			if chType == model.ChannelTypeMiMoFree {
+				for _, m := range provider.MiMoFreeAdvertisedModels() {
+					addModel(m)
+				}
+				continue
+			}
+
+			if modelsJSON == "" {
+				continue
+			}
+
+			var channelModels []string
+			if json.Unmarshal([]byte(modelsJSON), &channelModels) != nil {
+				continue
+			}
+			for _, m := range channelModels {
+				addModel(m)
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   models,
+		})
+	}
+}
+
 // ========== Agent Chat Handler ==========
 
 func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
@@ -325,28 +381,21 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 			}
 		}
 
-		// Create provider
-		providerCfg := &provider.ProviderConfig{
-			Name:    channel.Name,
-			Type:    getProviderType(channel.Type),
-			BaseURL: channel.BaseURL,
-			APIKey:  channel.Key,
-		}
-		if providerCfg.BaseURL == "" {
-			providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
-		}
+		modelName = resolveModelForChannel(channel, modelName)
+		log.Printf("[chat/agent] session=%s model=%s channel=%s(type=%d)", sessionID, modelName, channel.Name, channel.Type)
 
-		prov := provider.NewOpenAIProvider(providerCfg)
+		prov, err := createProviderFromChannel(channel)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 
 		// Call LLM
 		temperature := cfg.Agent.Temperature
 		maxTokens := cfg.Agent.MaxTokens
 		resp, err := prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
-			Model: modelName,
-			Messages: []provider.Message{
-				{Role: "system", Content: "You are a helpful AI assistant called CodeGateway. You can help with coding, research, and general tasks."},
-				{Role: "user", Content: req.Message},
-			},
+			Model:       modelName,
+			Messages:    buildAgentMessages(channel, modelName, req.Message),
 			Temperature: &temperature,
 			MaxTokens:   &maxTokens,
 		})
@@ -529,26 +578,84 @@ func findChannelForModel(database *db.DB, modelName string) (*model.Channel, err
 	}
 	defer rows.Close()
 
+	normalizedRequest := provider.NormalizeModelAlias(modelName)
+	var matches []*model.Channel
+
 	for rows.Next() {
 		var ch model.Channel
 		rows.Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
 
-		// Check if channel supports this model
 		if ch.Models == "" {
-			return &ch, nil // Empty models means supports all
+			matches = append(matches, &ch)
+			continue
 		}
 
 		var models []string
 		if json.Unmarshal([]byte(ch.Models), &models) == nil {
 			for _, m := range models {
-				if m == modelName {
-					return &ch, nil
+				if m == modelName || provider.NormalizeModelAlias(m) == normalizedRequest {
+					chCopy := ch
+					matches = append(matches, &chCopy)
+					break
 				}
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("no channel found for model: %s", modelName)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no channel found for model: %s", modelName)
+	}
+
+	if normalizedRequest == "mimo-auto" || normalizedRequest == "mimo-free" || strings.HasPrefix(normalizedRequest, "mimo-") {
+		for _, ch := range matches {
+			if ch.Type == model.ChannelTypeMiMoFree {
+				return ch, nil
+			}
+		}
+	}
+
+	for _, ch := range matches {
+		if ch.Type == model.ChannelTypeMiMoFree && ch.Models == "" {
+			return ch, nil
+		}
+	}
+
+	return matches[0], nil
+}
+
+func createProviderFromChannel(channel *model.Channel) (provider.Provider, error) {
+	providerCfg := &provider.ProviderConfig{
+		Name:    channel.Name,
+		Type:    getProviderType(channel.Type),
+		BaseURL: channel.BaseURL,
+		APIKey:  channel.Key,
+	}
+	if providerCfg.BaseURL == "" {
+		providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
+	}
+	return provider.NewProvider(providerCfg)
+}
+
+func resolveModelForChannel(channel *model.Channel, modelName string) string {
+	if channel.Type == model.ChannelTypeMiMoFree {
+		return provider.NormalizeModelForMiMoAuto(modelName)
+	}
+	return modelName
+}
+
+func buildAgentMessages(channel *model.Channel, modelName, userMessage string) []provider.Message {
+	if channel.Type == model.ChannelTypeMiMoFree {
+		return []provider.Message{{Role: "user", Content: userMessage}}
+	}
+
+	system := fmt.Sprintf(
+		"You are a helpful AI assistant. When asked about your identity, say you are the %s model served by CodeGateway.",
+		modelName,
+	)
+	return []provider.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: userMessage},
+	}
 }
 
 func findAnyChannel(database *db.DB) (*model.Channel, error) {
@@ -600,7 +707,7 @@ func getDefaultBaseURL(channelType int) string {
 	case 6:
 		return "https://api.xiaomimimo.com/v1"
 	case 7:
-		return "https://api.xiaomimimo.com/v1" // MiMo free tier
+		return "https://api.xiaomimimo.com"
 	case 8:
 		return "http://127.0.0.1:10001" // MiMoCode backend default
 	default:
@@ -675,7 +782,6 @@ func handleCreateToken(database *db.DB) gin.HandlerFunc {
 // ========== Message Processing ==========
 
 func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string) string {
-	// Find a suitable model
 	modelName := cfg.Agent.DefaultModel
 	channel, err := findChannelForModel(database, modelName)
 	if err != nil {
@@ -685,28 +791,19 @@ func processMessage(database *db.DB, cfg *config.Config, sessionID string, messa
 		}
 	}
 
-	// Create provider
-	providerCfg := &provider.ProviderConfig{
-		Name:    channel.Name,
-		Type:    getProviderType(channel.Type),
-		BaseURL: channel.BaseURL,
-		APIKey:  channel.Key,
-	}
-	if providerCfg.BaseURL == "" {
-		providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
+	modelName = resolveModelForChannel(channel, modelName)
+	log.Printf("[chat/ws] session=%s model=%s channel=%s(type=%d)", sessionID, modelName, channel.Name, channel.Type)
+
+	prov, err := createProviderFromChannel(channel)
+	if err != nil {
+		return "Error: " + err.Error()
 	}
 
-	prov := provider.NewOpenAIProvider(providerCfg)
-
-	// Call LLM
 	temperature := cfg.Agent.Temperature
 	maxTokens := cfg.Agent.MaxTokens
 	resp, err := prov.ChatCompletion(context.Background(), &provider.ChatCompletionRequest{
-		Model: modelName,
-		Messages: []provider.Message{
-			{Role: "system", Content: "You are a helpful AI assistant called CodeGateway. You can help with coding, research, and general tasks."},
-			{Role: "user", Content: message},
-		},
+		Model:       modelName,
+		Messages:    buildAgentMessages(channel, modelName, message),
 		Temperature: &temperature,
 		MaxTokens:   &maxTokens,
 	})
