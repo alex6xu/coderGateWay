@@ -15,7 +15,7 @@ redis:
   db: 0
 
 agent:
-  default_model: "mimo-v2.5-pro"
+  default_model: "mimo-auto"
   max_iterations: 50
   max_tokens: 128000
   temperature: 0.7
@@ -41,26 +41,16 @@ gateway:
     fallback_enabled: true
     retry_count: 3
   
-  free_proxies:
-    - name: "free-openai"
-      base_url: "https://api.free-openai.com"
-      models: ["gpt-4", "gpt-3.5-turbo", "gpt-4o"]
-      rate_limit: 100
-    
-    - name: "free-claude"
-      base_url: "https://api.free-claude.com"
-      models: ["claude-3-sonnet", "claude-3-opus"]
-      rate_limit: 50
-    
-    - name: "free-gemini"
-      base_url: "https://api.free-gemini.com"
-      models: ["gemini-pro", "gemini-ultra"]
-      rate_limit: 80
-    
-    - name: "free-deepseek"
-      base_url: "https://api.free-deepseek.com"
-      models: ["deepseek-v3", "deepseek-r1"]
-      rate_limit: 120
+  # 预置渠道
+  default_channels:
+    # MiMo 免费通道（无需 API Key）
+    - name: "MiMo Free"
+      type: 7
+      base_url: "https://api.xiaomimimo.com/v1"
+      key: ""
+      models: '["mimo-auto","mimo-v2.5-pro","mimo-v2.5"]'
+      weight: 10
+      priority: 100
 
 platforms:
   telegram:
@@ -85,6 +75,15 @@ billing:
   currency: "USD"
   
   pricing:
+    mimo-auto:
+      input: 0
+      output: 0
+    mimo-v2.5-pro:
+      input: 0.5
+      output: 2.0
+    mimo-v2.5:
+      input: 0.3
+      output: 1.0
     gpt-4o:
       input: 2.5
       output: 10
@@ -94,12 +93,3 @@ billing:
     deepseek-v3:
       input: 0.14
       output: 0.28
-    gemini-pro:
-      input: 0.5
-      output: 1.5
-    mimo-v2.5-pro:
-      input: 0.5
-      output: 2.0
-    mimo-v2.5:
-      input: 0.3
-      output: 1.0

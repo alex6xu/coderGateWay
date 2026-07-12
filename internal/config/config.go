@@ -62,9 +62,20 @@ type CronConfig struct {
 }
 
 type GatewayConfig struct {
-	Enabled      bool           `yaml:"enabled"`
-	Routing      RoutingConfig  `yaml:"routing"`
-	FreeProxies  []ProxyConfig  `yaml:"free_proxies"`
+	Enabled         bool              `yaml:"enabled"`
+	Routing         RoutingConfig     `yaml:"routing"`
+	FreeProxies     []ProxyConfig     `yaml:"free_proxies"`
+	DefaultChannels []DefaultChannel  `yaml:"default_channels"`
+}
+
+type DefaultChannel struct {
+	Name     string `yaml:"name"`
+	Type     int    `yaml:"type"`
+	BaseURL  string `yaml:"base_url"`
+	Key      string `yaml:"key"`
+	Models   string `yaml:"models"`
+	Weight   int    `yaml:"weight"`
+	Priority int    `yaml:"priority"`
 }
 
 type RoutingConfig struct {

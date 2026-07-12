@@ -109,10 +109,16 @@ export default function ChatPage() {
           setSessionId(data.session_id)
         }
         
+        // Check for API key error
+        let content = data.response || data.error || 'No response'
+        if (content.includes('API Key is required') || content.includes('API Key is invalid')) {
+          content = '⚠️ ' + content + '\n\n请前往 https://platform.xiaomimimo.com 获取免费 API Key，然后在 Channels 页面配置。'
+        }
+        
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
           role: 'assistant',
-          content: data.response || data.error || 'No response',
+          content: content,
           timestamp: new Date(),
         }])
       } catch (error) {

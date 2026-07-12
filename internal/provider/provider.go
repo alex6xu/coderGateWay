@@ -115,13 +115,15 @@ type MessageDelta struct {
 type ProviderType string
 
 const (
-	ProviderTypeOpenAI   ProviderType = "openai"
-	ProviderTypeClaude   ProviderType = "claude"
-	ProviderTypeGemini   ProviderType = "gemini"
-	ProviderTypeDeepSeek ProviderType = "deepseek"
-	ProviderTypeOllama   ProviderType = "ollama"
-	ProviderTypeMiMo     ProviderType = "mimo"
-	ProviderTypeCustom   ProviderType = "custom"
+	ProviderTypeOpenAI    ProviderType = "openai"
+	ProviderTypeClaude    ProviderType = "claude"
+	ProviderTypeGemini    ProviderType = "gemini"
+	ProviderTypeDeepSeek  ProviderType = "deepseek"
+	ProviderTypeOllama    ProviderType = "ollama"
+	ProviderTypeMiMo      ProviderType = "mimo"
+	ProviderTypeMiMoFree  ProviderType = "mimo-free"
+	ProviderTypeMiMoCode  ProviderType = "mimocode"
+	ProviderTypeCustom    ProviderType = "custom"
 )
 
 // ProviderConfig represents provider configuration
@@ -164,6 +166,10 @@ func (r *Registry) Register(config *ProviderConfig) error {
 		provider = NewOllamaProvider(config)
 	case ProviderTypeMiMo:
 		provider = NewOpenAIProvider(config) // MiMo uses OpenAI compatible API
+	case ProviderTypeMiMoFree:
+		provider = NewMiMoFreeProvider(config) // MiMo free tier with special headers
+	case ProviderTypeMiMoCode:
+		provider = NewMiMoCodeProvider(config) // MiMoCode session API
 	case ProviderTypeCustom:
 		provider = NewCustomProvider(config)
 	default:

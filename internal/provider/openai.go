@@ -48,7 +48,9 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
+	if p.config.APIKey != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -87,7 +89,9 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
+	if p.config.APIKey != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.config.APIKey))
+	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := p.client.Do(httpReq)

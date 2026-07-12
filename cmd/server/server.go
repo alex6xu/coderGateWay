@@ -31,6 +31,9 @@ func Run() error {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
+	// Initialize default channels
+	initDefaultChannels(database, cfg)
+
 	// Setup Gin router
 	r := gin.Default()
 
@@ -119,6 +122,35 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 
 			admin.GET("/tokens", handleListTokens(database))
 			admin.POST("/tokens", handleCreateToken(database))
+		}
+	}
+}
+
+func initDefaultChannels(database *db.DB, cfg *config.Config) {
+	// Check if any channels exist
+	var count int
+	err := database.QueryRow("SELECT COUNT(*) FROM channels").Scan(&count)
+	if err != nil {
+		log.Printf("Failed to check channels: %v", err)
+		return
+	}
+
+	// If no channels exist, create default ones from config
+	if count > 0 {
+		return
+	}
+
+	log.Println("No channels found, creating default channels...")
+
+	for _, ch := range cfg.Gateway.DefaultChannels {
+		_, err := database.Exec(`
+			INSERT INTO channels (name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'default', datetime('now'), datetime('now'))
+		`, ch.Name, ch.Type, ch.Key, ch.BaseURL, ch.Models, ch.Weight, ch.Priority)
+		if err != nil {
+			log.Printf("Failed to create default channel %s: %v", ch.Name, err)
+		} else {
+			log.Printf("Created default channel: %s", ch.Name)
 		}
 	}
 }

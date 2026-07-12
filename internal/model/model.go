@@ -128,6 +128,8 @@ const (
 	ChannelTypeDeepSeek = 4
 	ChannelTypeOllama   = 5
 	ChannelTypeMiMo     = 6
+	ChannelTypeMiMoFree = 7
+	ChannelTypeMiMoCode = 8
 	ChannelTypeCustom   = 99
 )
 

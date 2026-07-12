@@ -578,6 +578,10 @@ func getProviderType(channelType int) provider.ProviderType {
 		return provider.ProviderTypeOllama
 	case 6:
 		return provider.ProviderTypeMiMo
+	case 7:
+		return provider.ProviderTypeMiMoFree
+	case 8:
+		return provider.ProviderTypeMiMoCode
 	default:
 		return provider.ProviderTypeOpenAI
 	}
@@ -595,6 +599,10 @@ func getDefaultBaseURL(channelType int) string {
 		return "https://api.deepseek.com/v1"
 	case 6:
 		return "https://api.xiaomimimo.com/v1"
+	case 7:
+		return "https://api.xiaomimimo.com/v1" // MiMo free tier
+	case 8:
+		return "http://127.0.0.1:10001" // MiMoCode backend default
 	default:
 		return "https://api.openai.com/v1"
 	}

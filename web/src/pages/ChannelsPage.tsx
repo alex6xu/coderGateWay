@@ -108,6 +108,8 @@ export default function ChannelsPage() {
     4: { name: 'DeepSeek', color: 'text-cyan-400 bg-cyan-500/10' },
     5: { name: 'Ollama', color: 'text-amber-400 bg-amber-500/10' },
     6: { name: 'MiMo', color: 'text-orange-400 bg-orange-500/10' },
+    7: { name: 'MiMo Free', color: 'text-red-400 bg-red-500/10' },
+    8: { name: 'MiMoCode', color: 'text-pink-400 bg-pink-500/10' },
     99: { name: 'Custom', color: 'text-gray-400 bg-gray-500/10' },
   }
 
@@ -117,6 +119,8 @@ export default function ChannelsPage() {
     3: 'https://generativelanguage.googleapis.com/v1beta',
     4: 'https://api.deepseek.com/v1',
     6: 'https://api.xiaomimimo.com/v1',
+    7: 'https://api.xiaomimimo.com/v1',
+    8: 'http://127.0.0.1:10001',
   }
 
   return (
@@ -177,7 +181,9 @@ export default function ChannelsPage() {
                   <option value={3}>Gemini</option>
                   <option value={4}>DeepSeek</option>
                   <option value={5}>Ollama</option>
-                  <option value={6}>MiMo</option>
+                  <option value={6}>MiMo (API)</option>
+                  <option value={7}>MiMo Free (无需Key)</option>
+                  <option value={8}>MiMoCode</option>
                   <option value={99}>Custom</option>
                 </select>
               </div>
