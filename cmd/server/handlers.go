@@ -689,6 +689,8 @@ func getProviderType(channelType int) provider.ProviderType {
 		return provider.ProviderTypeMiMoFree
 	case 8:
 		return provider.ProviderTypeMiMoCode
+	case 10:
+		return provider.ProviderTypeGLM
 	default:
 		return provider.ProviderTypeOpenAI
 	}
@@ -710,6 +712,8 @@ func getDefaultBaseURL(channelType int) string {
 		return "https://api.xiaomimimo.com"
 	case 8:
 		return "http://127.0.0.1:10001" // MiMoCode backend default
+	case 10:
+		return "https://open.bigmodel.cn/api/paas/v4"
 	default:
 		return "https://api.openai.com/v1"
 	}

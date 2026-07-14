@@ -92,3 +92,12 @@ billing:
     deepseek-v3:
       input: 0.14
       output: 0.28
+    glm-4-flash:
+      input: 0.1
+      output: 0.1
+    glm-4.7:
+      input: 0.5
+      output: 2.0
+    glm-5.2:
+      input: 1.0
+      output: 4.0
