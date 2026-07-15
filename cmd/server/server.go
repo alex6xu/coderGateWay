@@ -10,6 +10,7 @@ import (
 	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
+	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,6 +45,8 @@ func Run() error {
 	log.Printf("Default account ready: %s (id=%d)", defaultAccount.Username, defaultAccount.ID)
 	log.Printf("Auth: login with username=%s (default password from CODEGATEWAY_ADMIN_PASSWORD or %q)", account.DefaultUsername, account.DefaultAdminPassword)
 
+	workspaceMgr := workspace.NewManager(database.DB, "./data/workspaces")
+
 	// Initialize default channels for the default account
 	initDefaultChannels(database, cfg, defaultAccount.ID)
 
@@ -55,7 +58,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub, accountMgr)
+	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -76,7 +79,7 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -135,9 +138,19 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 
 			agent := protected.Group("/agent")
 			{
-				agent.POST("/chat", handleAgentChat(database, cfg))
+				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr))
 				agent.GET("/sessions", handleListSessions(database))
 				agent.GET("/sessions/:id", handleGetSession(database))
+			}
+
+			wsAPI := protected.Group("/workspaces")
+			{
+				wsAPI.GET("", handleListWorkspaces(workspaceMgr))
+				wsAPI.POST("/upload", handleUploadWorkspace(workspaceMgr))
+				wsAPI.GET("/:id", handleGetWorkspace(workspaceMgr))
+				wsAPI.DELETE("/:id", handleDeleteWorkspace(workspaceMgr))
+				wsAPI.GET("/:id/tree", handleWorkspaceTree(workspaceMgr))
+				wsAPI.GET("/:id/download", handleDownloadWorkspace(workspaceMgr))
 			}
 
 			admin := protected.Group("/admin")

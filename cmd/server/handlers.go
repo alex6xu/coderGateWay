@@ -15,6 +15,7 @@ import (
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/model"
 	"github.com/alex/codegateway/internal/provider"
+	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -313,7 +314,7 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 
 // ========== Agent Chat Handler ==========
 
-func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
+func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -321,10 +322,11 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		var req struct {
-			Message   string `json:"message" binding:"required"`
-			SessionID string `json:"session_id"`
-			Mode      string `json:"mode"`  // "coder" for code development, empty for general chat
-			Model     string `json:"model"` // optional model override
+			Message     string `json:"message" binding:"required"`
+			SessionID   string `json:"session_id"`
+			Mode        string `json:"mode"`  // "coder" for code development, empty for general chat
+			Model       string `json:"model"` // optional model override
+			WorkspaceID string `json:"workspace_id"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -377,7 +379,8 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		modelName = resolveModelForChannel(channel, modelName)
-		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d)", accountID, sessionID, mode, modelName, channel.Name, channel.Type)
+		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d) workspace=%s",
+			accountID, sessionID, mode, modelName, channel.Name, channel.Type, req.WorkspaceID)
 
 		prov, err := createProviderFromChannel(channel)
 		if err != nil {
@@ -385,24 +388,57 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// Call LLM
 		temperature := cfg.Agent.Temperature
 		maxTokens := cfg.Agent.MaxTokens
-		resp, err := prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
-			Model:       modelName,
-			Messages:    buildAgentMessages(channel, modelName, req.Message, mode),
-			Temperature: &temperature,
-			MaxTokens:   &maxTokens,
-		})
+		responseContent := ""
+		var usage provider.Usage
+		var toolSteps []map[string]string
+
+		if mode == "coder" && req.WorkspaceID != "" && workspaceMgr != nil {
+			ws, werr := workspaceMgr.Get(accountID, req.WorkspaceID)
+			if werr != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
+				return
+			}
+			tree, _ := workspaceMgr.ListTree(ws, ".", false)
+			enriched := req.Message
+			if hint := summarizeTreeHint(tree); hint != "" {
+				enriched = "Project files (sample):\n" + hint + "\n\nUser request:\n" + req.Message
+			}
+			responseContent, usage, toolSteps, err = runCoderAgent(
+				c.Request.Context(),
+				prov,
+				modelName,
+				enriched,
+				ws,
+				temperature,
+				maxTokens,
+				cfg.Agent.MaxIterations,
+			)
+			_ = workspaceMgr.RefreshStats(ws)
+		} else {
+			messages := buildAgentMessages(channel, modelName, req.Message, mode)
+			if mode == "coder" && req.WorkspaceID == "" {
+				messages = coderFallbackPrompt(modelName, req.Message)
+			}
+			var resp *provider.ChatCompletionResponse
+			resp, err = prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
+				Model:       modelName,
+				Messages:    messages,
+				Temperature: &temperature,
+				MaxTokens:   &maxTokens,
+			})
+			if err == nil && resp != nil {
+				usage = resp.Usage
+				if len(resp.Choices) > 0 {
+					responseContent = resp.Choices[0].Message.Content
+				}
+			}
+		}
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
-		}
-
-		responseContent := ""
-		if len(resp.Choices) > 0 {
-			responseContent = resp.Choices[0].Message.Content
 		}
 
 		// Save assistant message
@@ -410,7 +446,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		database.Exec(`
 			INSERT INTO messages (id, session_id, role, content, model, provider, tokens, created_at)
 			VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)
-		`, assistantMsgID, sessionID, responseContent, modelName, channel.Name, resp.Usage.TotalTokens, time.Now())
+		`, assistantMsgID, sessionID, responseContent, modelName, channel.Name, usage.TotalTokens, time.Now())
 
 		// Update session
 		database.Exec(`
@@ -418,10 +454,12 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		`, time.Now(), sessionID)
 
 		c.JSON(http.StatusOK, gin.H{
-			"response":   responseContent,
-			"session_id": sessionID,
-			"model":      modelName,
-			"usage":      resp.Usage,
+			"response":     responseContent,
+			"session_id":   sessionID,
+			"model":        modelName,
+			"usage":        usage,
+			"workspace_id": req.WorkspaceID,
+			"tool_steps":   toolSteps,
 		})
 	}
 }

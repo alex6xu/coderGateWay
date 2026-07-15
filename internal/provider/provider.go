@@ -53,8 +53,9 @@ type Tool struct {
 // ToolFunction represents a tool function
 type ToolFunction struct {
 	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Parameters  interface{} `json:"parameters"`
+	Description string      `json:"description,omitempty"`
+	Parameters  interface{} `json:"parameters,omitempty"`
+	Arguments   string      `json:"arguments,omitempty"` // present on tool_call responses
 }
 
 // ToolCall represents a tool call
