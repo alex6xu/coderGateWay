@@ -26,22 +26,37 @@ type Provider interface {
 
 // ChatCompletionRequest represents a chat completion request
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	MaxTokens   *int      `json:"max_tokens,omitempty"`
-	TopP        *float64  `json:"top_p,omitempty"`
-	Stream      bool      `json:"stream"`
-	Tools       []Tool    `json:"tools,omitempty"`
+	Model            string         `json:"model"`
+	Messages         []Message      `json:"messages"`
+	Temperature      *float64       `json:"temperature,omitempty"`
+	MaxTokens        *int           `json:"max_tokens,omitempty"`
+	TopP             *float64       `json:"top_p,omitempty"`
+	Stream           bool           `json:"stream"`
+	Tools            []Tool         `json:"tools,omitempty"`
+	PromptCacheKey   string         `json:"prompt_cache_key,omitempty"`
+	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
+	// EnablePromptCache hints providers that support explicit cache markers (e.g. Anthropic).
+	EnablePromptCache bool `json:"-"`
+}
+
+// StreamOptions controls streaming extras (OpenAI-compatible).
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // Message represents a chat message
 type Message struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content"`
-	Name       string      `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content"`
+	Name         string        `json:"name,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// CacheControl marks a message/block for provider-side prompt caching (Anthropic-style).
+type CacheControl struct {
+	Type string `json:"type"` // "ephemeral"
 }
 
 // Tool represents a tool definition
@@ -84,18 +99,48 @@ type Choice struct {
 
 // Usage represents token usage
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                 `json:"prompt_tokens"`
+	CompletionTokens    int                 `json:"completion_tokens"`
+	TotalTokens         int                 `json:"total_tokens"`
+	CachedTokens        int                 `json:"cached_tokens,omitempty"`
+	PromptTokensDetails *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokenDetails carries cache hit info from OpenAI-compatible APIs.
+type PromptTokenDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// Normalize fills CachedTokens from nested details when present.
+func (u *Usage) Normalize() {
+	if u == nil {
+		return
+	}
+	if u.CachedTokens == 0 && u.PromptTokensDetails != nil {
+		u.CachedTokens = u.PromptTokensDetails.CachedTokens
+	}
+	if u.TotalTokens == 0 && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+}
+
+// Add accumulates usage from another response turn.
+func (u *Usage) Add(other Usage) {
+	other.Normalize()
+	u.PromptTokens += other.PromptTokens
+	u.CompletionTokens += other.CompletionTokens
+	u.TotalTokens += other.TotalTokens
+	u.CachedTokens += other.CachedTokens
 }
 
 // ChatCompletionChunk represents a streaming chunk
 type ChatCompletionChunk struct {
-	ID      string       `json:"id"`
-	Object  string       `json:"object"`
-	Created int64        `json:"created"`
-	Model   string       `json:"model"`
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created int64         `json:"created"`
+	Model   string        `json:"model"`
 	Choices []ChunkChoice `json:"choices"`
+	Usage   *Usage        `json:"usage,omitempty"`
 }
 
 // ChunkChoice represents a choice in a streaming chunk
@@ -112,21 +157,45 @@ type MessageDelta struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
+// ApplyPromptCache sets OpenAI-compatible cache key and Anthropic-style markers on
+// the stable prefix (first system message, optional second system/checkpoint).
+func ApplyPromptCache(req *ChatCompletionRequest, cacheKey string) {
+	if req == nil {
+		return
+	}
+	req.EnablePromptCache = true
+	if cacheKey != "" {
+		req.PromptCacheKey = cacheKey
+	}
+	// Mark the last stable system message for Anthropic-style caching.
+	lastSys := -1
+	for i, m := range req.Messages {
+		if m.Role == "system" {
+			lastSys = i
+		} else {
+			break // systems only at the front in our assembly
+		}
+	}
+	if lastSys >= 0 {
+		req.Messages[lastSys].CacheControl = &CacheControl{Type: "ephemeral"}
+	}
+}
+
 // ProviderType represents the type of provider
 type ProviderType string
 
 const (
-	ProviderTypeOpenAI    ProviderType = "openai"
-	ProviderTypeClaude    ProviderType = "claude"
-	ProviderTypeGemini    ProviderType = "gemini"
-	ProviderTypeDeepSeek  ProviderType = "deepseek"
-	ProviderTypeOllama    ProviderType = "ollama"
-	ProviderTypeMiMo      ProviderType = "mimo"
-	ProviderTypeMiMoFree  ProviderType = "mimo-free"
-	ProviderTypeMiMoCode  ProviderType = "mimocode"
-	ProviderTypeAgnes     ProviderType = "agnes"
-	ProviderTypeGLM       ProviderType = "glm"
-	ProviderTypeCustom    ProviderType = "custom"
+	ProviderTypeOpenAI   ProviderType = "openai"
+	ProviderTypeClaude   ProviderType = "claude"
+	ProviderTypeGemini   ProviderType = "gemini"
+	ProviderTypeDeepSeek ProviderType = "deepseek"
+	ProviderTypeOllama   ProviderType = "ollama"
+	ProviderTypeMiMo     ProviderType = "mimo"
+	ProviderTypeMiMoFree ProviderType = "mimo-free"
+	ProviderTypeMiMoCode ProviderType = "mimocode"
+	ProviderTypeAgnes    ProviderType = "agnes"
+	ProviderTypeGLM      ProviderType = "glm"
+	ProviderTypeCustom   ProviderType = "custom"
 )
 
 // ProviderConfig represents provider configuration
@@ -212,7 +281,6 @@ func (r *Registry) List() []string {
 
 // GetProviderForModel returns the best provider for a given model
 func (r *Registry) GetProviderForModel(model string) (Provider, error) {
-	// Try to find a provider that supports the model
 	for name, config := range r.configs {
 		for _, m := range config.Models {
 			if strings.EqualFold(m, model) {
@@ -221,7 +289,6 @@ func (r *Registry) GetProviderForModel(model string) (Provider, error) {
 		}
 	}
 
-	// If no specific provider found, try to infer from model name
 	if strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1-") {
 		return r.Get("openai")
 	}

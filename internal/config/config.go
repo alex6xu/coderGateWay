@@ -36,18 +36,21 @@ type RedisConfig struct {
 }
 
 type AgentConfig struct {
-	DefaultModel          string       `yaml:"default_model"`
-	MaxIterations         int          `yaml:"max_iterations"`
-	MaxTokens             int          `yaml:"max_tokens"` // completion / generation cap
-	ContextBudgetTokens   int          `yaml:"context_budget_tokens"`
-	HistoryMaxTurns       int          `yaml:"history_max_turns"`
-	ToolResultMaxChars    int          `yaml:"tool_result_max_chars"`
-	ToolResultKeepRecent  int          `yaml:"tool_result_keep_recent"`
-	SummarizeEveryTurns   int          `yaml:"summarize_every_turns"`
-	Temperature           float64      `yaml:"temperature"`
-	MemoryConfig          MemoryConfig `yaml:"memory"`
-	SkillsConfig          SkillsConfig `yaml:"skills"`
-	CronConfig            CronConfig   `yaml:"cron"`
+	DefaultModel           string       `yaml:"default_model"`
+	MaxIterations          int          `yaml:"max_iterations"`
+	MaxTokens              int          `yaml:"max_tokens"` // completion / generation cap
+	ContextBudgetTokens    int          `yaml:"context_budget_tokens"`
+	HistoryMaxTurns        int          `yaml:"history_max_turns"`
+	ToolResultMaxChars     int          `yaml:"tool_result_max_chars"`
+	ToolResultKeepRecent   int          `yaml:"tool_result_keep_recent"`
+	SummarizeEveryTurns    int          `yaml:"summarize_every_turns"`
+	Temperature            float64      `yaml:"temperature"`
+	PromptCacheEnabled     bool         `yaml:"prompt_cache_enabled"`
+	ParallelReadonlyTools  bool         `yaml:"parallel_readonly_tools"`
+	TreeHintLimit          int          `yaml:"tree_hint_limit"`
+	MemoryConfig           MemoryConfig `yaml:"memory"`
+	SkillsConfig           SkillsConfig `yaml:"skills"`
+	CronConfig             CronConfig   `yaml:"cron"`
 }
 
 type MemoryConfig struct {
@@ -187,15 +190,18 @@ func defaultConfig() *Config {
 			DB:       0,
 		},
 		Agent: AgentConfig{
-			DefaultModel:         "gpt-4o",
-			MaxIterations:        50,
-			MaxTokens:            4096,
-			ContextBudgetTokens:  8000,
-			HistoryMaxTurns:      8,
-			ToolResultMaxChars:   4000,
-			ToolResultKeepRecent: 2,
-			SummarizeEveryTurns:  10,
-			Temperature:          0.7,
+			DefaultModel:          "gpt-4o",
+			MaxIterations:         50,
+			MaxTokens:             4096,
+			ContextBudgetTokens:   8000,
+			HistoryMaxTurns:       8,
+			ToolResultMaxChars:    4000,
+			ToolResultKeepRecent:  2,
+			SummarizeEveryTurns:   10,
+			Temperature:           0.7,
+			PromptCacheEnabled:    true,
+			ParallelReadonlyTools: true,
+			TreeHintLimit:         40,
 			MemoryConfig: MemoryConfig{
 				Enabled:           true,
 				ReconcileOnSearch: true,

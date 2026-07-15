@@ -219,6 +219,19 @@ export default function CoderPage() {
     setInput('')
     setIsLoading(true)
 
+    const assistantId = (Date.now() + 1).toString()
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        model: selectedModel || undefined,
+        toolSteps: [],
+      },
+    ])
+
     try {
       const response = await apiFetch(
         '/v1/agent/chat',
@@ -231,47 +244,108 @@ export default function CoderPage() {
             mode: 'coder',
             model: selectedModel || undefined,
             workspace_id: workspaceId || undefined,
+            stream: true,
           }),
         },
         currentAccount?.id,
       )
-      const data = await response.json()
 
-      if (data.session_id) {
-        setSessionId(data.session_id)
+      if (!response.ok || !response.body) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${response.status}`)
       }
 
-      let reply = data.response || data.error || 'No response'
-      if (reply.includes('MiMoCode backend') || reply.includes('create session failed')) {
-        reply =
-          '⚠️ ' +
-          reply +
-          '\n\n如需使用 MiMoCode 本地代理，请先启动：\n`mimo serve --hostname 127.0.0.1 --port 10001`\n默认免费通道（类型 7）无需本地服务，可直接调用 mimo-auto。'
-      } else if (reply.includes('no available channel')) {
-        reply = '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。'
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullText = ''
+      const steps: { tool: string; args: string; result: string }[] = []
+
+      const applyAssistant = (patch: Partial<Message>) => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)),
+        )
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: reply,
-          timestamp: new Date(),
-          model: selectedModel || data.model,
-          toolSteps: data.tool_steps || undefined,
-        },
-      ])
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: 'Error: Failed to send message. Is the backend running?',
-          timestamp: new Date(),
-        },
-      ])
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const part of parts) {
+          const line = part.trim()
+          if (!line.startsWith('data:')) continue
+          const payload = line.replace(/^data:\s*/, '')
+          if (payload === '[DONE]') continue
+          let ev: {
+            type?: string
+            content?: string
+            session_id?: string
+            model?: string
+            step?: { tool: string; args: string; result: string }
+            tool_steps?: { tool: string; args: string; result: string }[]
+          }
+          try {
+            ev = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (ev.session_id) setSessionId(ev.session_id)
+          if (ev.type === 'delta' && ev.content) {
+            fullText += ev.content
+            applyAssistant({ content: fullText, model: ev.model || selectedModel })
+          } else if (ev.type === 'tool_step' && ev.step) {
+            steps.push(ev.step)
+            applyAssistant({ toolSteps: [...steps] })
+          } else if (ev.type === 'done') {
+            if (ev.content) fullText = ev.content
+            if (ev.tool_steps?.length) {
+              steps.splice(0, steps.length, ...ev.tool_steps)
+            }
+            applyAssistant({
+              content: fullText,
+              model: ev.model || selectedModel,
+              toolSteps: steps.length ? [...steps] : undefined,
+            })
+          } else if (ev.type === 'error') {
+            fullText = ev.content || 'Agent error'
+            applyAssistant({ content: fullText })
+          }
+        }
+      }
+
+      if (!fullText) {
+        applyAssistant({ content: 'No response' })
+      } else if (
+        fullText.includes('MiMoCode backend') ||
+        fullText.includes('create session failed')
+      ) {
+        applyAssistant({
+          content:
+            '⚠️ ' +
+            fullText +
+            '\n\n如需使用 MiMoCode 本地代理，请先启动：\n`mimo serve --hostname 127.0.0.1 --port 10001`\n默认免费通道（类型 7）无需本地服务，可直接调用 mimo-auto。',
+        })
+      } else if (fullText.includes('no available channel')) {
+        applyAssistant({
+          content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
+        })
+      }
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content:
+                  err instanceof Error
+                    ? `Error: ${err.message}`
+                    : 'Error: Failed to send message. Is the backend running?',
+              }
+            : m,
+        ),
+      )
     } finally {
       setIsLoading(false)
     }

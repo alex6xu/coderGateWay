@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -47,19 +48,21 @@ func (r *ToolRegistry) Get(name string) (*Tool, error) {
 	return tool, nil
 }
 
-// List returns all registered tools
+// List returns all registered tools in stable name order (prefix-cache friendly).
 func (r *ToolRegistry) List() []*Tool {
 	tools := make([]*Tool, 0, len(r.tools))
 	for _, tool := range r.tools {
 		tools = append(tools, tool)
 	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools
 }
 
-// GetSchemas returns all tool schemas for LLM
+// GetSchemas returns all tool schemas for LLM in stable name order.
 func (r *ToolRegistry) GetSchemas() []map[string]interface{} {
-	schemas := make([]map[string]interface{}, 0, len(r.tools))
-	for _, tool := range r.tools {
+	listed := r.List()
+	schemas := make([]map[string]interface{}, 0, len(listed))
+	for _, tool := range listed {
 		schemas = append(schemas, map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
@@ -70,6 +73,16 @@ func (r *ToolRegistry) GetSchemas() []map[string]interface{} {
 		})
 	}
 	return schemas
+}
+
+// IsReadOnly reports whether a tool is safe to run concurrently.
+func IsReadOnly(name string) bool {
+	switch name {
+	case "read_file", "list_directory", "grep", "search_files":
+		return true
+	default:
+		return false
+	}
 }
 
 // registerBuiltinTools registers built-in tools

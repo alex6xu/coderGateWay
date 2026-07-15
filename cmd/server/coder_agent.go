@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/alex/codegateway/internal/agent/promptctx"
 	"github.com/alex/codegateway/internal/provider"
@@ -13,24 +14,41 @@ import (
 	"github.com/alex/codegateway/internal/workspace"
 )
 
+// AgentEvent is emitted during streaming agent/coder runs.
+type AgentEvent struct {
+	Type      string              `json:"type"` // meta|delta|tool_step|done|error
+	Content   string              `json:"content,omitempty"`
+	Step      map[string]string   `json:"step,omitempty"`
+	ToolSteps []map[string]string `json:"tool_steps,omitempty"`
+	Usage     *provider.Usage     `json:"usage,omitempty"`
+	Model     string              `json:"model,omitempty"`
+	Session   string              `json:"session_id,omitempty"`
+}
+
+type coderOptions struct {
+	Temperature          float64
+	MaxTokens            int
+	MaxIterations        int
+	ToolResultMaxChars   int
+	ParallelReadonly     bool
+	PromptCacheKey       string
+	EnablePromptCache    bool
+	OnEvent              func(AgentEvent)
+}
+
 func runCoderAgent(
 	ctx context.Context,
 	prov provider.Provider,
 	modelName string,
 	seed []provider.Message,
 	ws *workspace.Workspace,
-	temperature float64,
-	maxTokens int,
-	maxIterations int,
-	toolResultMaxChars int,
-	toolResultKeepRecent int,
+	opt coderOptions,
 ) (string, provider.Usage, []map[string]string, error) {
-	_ = toolResultKeepRecent // mid-loop rewrite disabled for prefix cache; kept for API compat
-	if maxIterations <= 0 {
-		maxIterations = 8
+	if opt.MaxIterations <= 0 {
+		opt.MaxIterations = 8
 	}
-	if maxTokens <= 0 {
-		maxTokens = 4096
+	if opt.MaxTokens <= 0 {
+		opt.MaxTokens = 4096
 	}
 
 	registry := tool.NewChrootedRegistry(ws.RootPath)
@@ -44,81 +62,153 @@ func runCoderAgent(
 
 	var usage provider.Usage
 	var steps []map[string]string
+	emit := func(ev AgentEvent) {
+		if opt.OnEvent != nil {
+			opt.OnEvent(ev)
+		}
+	}
 
-	// Do not rewrite earlier tool messages inside the loop — that busts prompt
-	// prefix cache. Only cap newly appended tool results below.
-	for i := 0; i < maxIterations; i++ {
-		temp := temperature
-		mt := maxTokens
-		resp, err := prov.ChatCompletion(ctx, &provider.ChatCompletionRequest{
+	for i := 0; i < opt.MaxIterations; i++ {
+		temp := opt.Temperature
+		mt := opt.MaxTokens
+		req := &provider.ChatCompletionRequest{
 			Model:       modelName,
 			Messages:    messages,
 			Temperature: &temp,
 			MaxTokens:   &mt,
 			Tools:       tools,
-		})
+		}
+		if opt.EnablePromptCache {
+			provider.ApplyPromptCache(req, opt.PromptCacheKey)
+		}
+
+		resp, err := prov.ChatCompletion(ctx, req)
 		if err != nil {
+			emit(AgentEvent{Type: "error", Content: err.Error()})
 			return "", usage, steps, err
 		}
 
-		usage.PromptTokens += resp.Usage.PromptTokens
-		usage.CompletionTokens += resp.Usage.CompletionTokens
-		usage.TotalTokens += resp.Usage.TotalTokens
+		usage.Add(resp.Usage)
 
 		if len(resp.Choices) == 0 {
-			return "", usage, steps, fmt.Errorf("empty model response")
+			err := fmt.Errorf("empty model response")
+			emit(AgentEvent{Type: "error", Content: err.Error()})
+			return "", usage, steps, err
 		}
 
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
+			if msg.Content != "" {
+				emit(AgentEvent{Type: "delta", Content: msg.Content})
+			}
 			return msg.Content, usage, steps, nil
 		}
 
 		messages = append(messages, msg)
 
-		for _, tc := range msg.ToolCalls {
-			args := map[string]interface{}{}
-			raw := tc.Function.Arguments
-			if raw == "" && tc.Function.Parameters != nil {
-				b, _ := json.Marshal(tc.Function.Parameters)
-				raw = string(b)
-			}
-			if raw != "" {
-				_ = json.Unmarshal([]byte(raw), &args)
-			}
+		toolMsgs, newSteps := executeToolCalls(ctx, registry, msg.ToolCalls, opt.ToolResultMaxChars, opt.ParallelReadonly, ws.ID, emit)
+		steps = append(steps, newSteps...)
+		messages = append(messages, toolMsgs...)
+	}
 
-			t, err := registry.Get(tc.Function.Name)
-			content := ""
-			if err != nil {
-				content = fmt.Sprintf("Error: %v", err)
+	err := fmt.Errorf("max tool iterations reached; try a more specific request")
+	emit(AgentEvent{Type: "error", Content: err.Error()})
+	return "", usage, steps, err
+}
+
+func executeToolCalls(
+	ctx context.Context,
+	registry *tool.ToolRegistry,
+	calls []provider.ToolCall,
+	toolResultMaxChars int,
+	parallelReadonly bool,
+	workspaceID string,
+	emit func(AgentEvent),
+) ([]provider.Message, []map[string]string) {
+	type result struct {
+		idx     int
+		msg     provider.Message
+		step    map[string]string
+	}
+
+	runOne := func(i int, tc provider.ToolCall) result {
+		args := map[string]interface{}{}
+		raw := tc.Function.Arguments
+		if raw == "" && tc.Function.Parameters != nil {
+			b, _ := json.Marshal(tc.Function.Parameters)
+			raw = string(b)
+		}
+		if raw != "" {
+			_ = json.Unmarshal([]byte(raw), &args)
+		}
+
+		t, err := registry.Get(tc.Function.Name)
+		content := ""
+		if err != nil {
+			content = fmt.Sprintf("Error: %v", err)
+		} else {
+			out, herr := t.Handler(ctx, args)
+			if herr != nil {
+				content = fmt.Sprintf("%s\nError: %v", out, herr)
 			} else {
-				out, herr := t.Handler(ctx, args)
-				if herr != nil {
-					content = fmt.Sprintf("%s\nError: %v", out, herr)
-				} else {
-					content = out
-				}
+				content = out
 			}
-
-			// Cap only this new tool result — do not rewrite older tool messages.
-			modelContent := promptctx.TruncateToolResult(content, toolResultMaxChars)
-
-			steps = append(steps, map[string]string{
-				"tool":   tc.Function.Name,
-				"args":   raw,
-				"result": truncate(content, 2000),
-			})
-			log.Printf("[coder] tool=%s workspace=%s", tc.Function.Name, ws.ID)
-
-			messages = append(messages, provider.Message{
+		}
+		modelContent := promptctx.TruncateToolResult(content, toolResultMaxChars)
+		step := map[string]string{
+			"tool":   tc.Function.Name,
+			"args":   raw,
+			"result": truncate(content, 2000),
+		}
+		log.Printf("[coder] tool=%s workspace=%s", tc.Function.Name, workspaceID)
+		return result{
+			idx: i,
+			msg: provider.Message{
 				Role:       "tool",
 				Content:    modelContent,
 				ToolCallID: tc.ID,
-			})
+			},
+			step: step,
 		}
 	}
 
-	return "", usage, steps, fmt.Errorf("max tool iterations reached; try a more specific request")
+	allReadonly := parallelReadonly && len(calls) > 1
+	if allReadonly {
+		for _, tc := range calls {
+			if !tool.IsReadOnly(tc.Function.Name) {
+				allReadonly = false
+				break
+			}
+		}
+	}
+
+	results := make([]result, len(calls))
+	if allReadonly {
+		var wg sync.WaitGroup
+		for i, tc := range calls {
+			wg.Add(1)
+			go func(i int, tc provider.ToolCall) {
+				defer wg.Done()
+				results[i] = runOne(i, tc)
+			}(i, tc)
+		}
+		wg.Wait()
+	} else {
+		for i, tc := range calls {
+			results[i] = runOne(i, tc)
+		}
+	}
+
+	msgs := make([]provider.Message, 0, len(results))
+	steps := make([]map[string]string, 0, len(results))
+	for _, r := range results {
+		msgs = append(msgs, r.msg)
+		steps = append(steps, r.step)
+		if emit != nil {
+			emit(AgentEvent{Type: "tool_step", Step: r.step})
+		}
+	}
+	return msgs, steps
 }
 
 func toProviderTools(registry *tool.ToolRegistry) []provider.Tool {
@@ -148,6 +238,7 @@ func coderSystemPrompt(modelName, workspaceName string) string {
 		"You are CodeGateway Coder, an expert software engineering agent powered by %s working inside a cloud workspace.\n"+
 			"Project: %s (treat paths as relative to project root).\n"+
 			"Use tools to explore and edit files. Prefer read_file / list_directory / grep / search_files before writing.\n"+
+			"When reading large files, use offset/limit line ranges.\n"+
 			"When changing code, use write_file with complete file contents for the files you modify.\n"+
 			"After edits, briefly summarize what changed and how to verify.\n"+
 			"Do not attempt to access paths outside the project.\n"+
@@ -172,17 +263,49 @@ func chatSystemPrompt(modelName, mode string) string {
 	)
 }
 
-func summarizeTreeHint(entries []workspace.TreeEntry) string {
+// RankedTreeHint picks query-relevant paths from a workspace tree.
+func RankedTreeHint(entries []workspace.TreeEntry, query string, limit int) string {
+	if limit <= 0 {
+		limit = 40
+	}
 	if len(entries) == 0 {
 		return "(empty project)"
 	}
-	var b strings.Builder
-	limit := 40
-	for i, e := range entries {
-		if i >= limit {
-			b.WriteString("…\n")
-			break
+	tokens := tokenizeQuery(query)
+	type scored struct {
+		e     workspace.TreeEntry
+		score int
+	}
+	scoredEntries := make([]scored, 0, len(entries))
+	for _, e := range entries {
+		s := scorePath(e.Path, tokens)
+		// Prefer source-like files slightly
+		lower := strings.ToLower(e.Path)
+		if strings.HasSuffix(lower, ".go") || strings.HasSuffix(lower, ".ts") || strings.HasSuffix(lower, ".tsx") ||
+			strings.HasSuffix(lower, ".py") || strings.HasSuffix(lower, ".rs") || strings.HasSuffix(lower, ".java") {
+			s++
 		}
+		if strings.Contains(lower, "node_modules") || strings.Contains(lower, ".git/") || strings.HasPrefix(lower, ".") {
+			s -= 5
+		}
+		scoredEntries = append(scoredEntries, scored{e: e, score: s})
+	}
+	// Stable-ish: higher score first, then shorter path
+	for i := 0; i < len(scoredEntries); i++ {
+		for j := i + 1; j < len(scoredEntries); j++ {
+			a, b := scoredEntries[i], scoredEntries[j]
+			if b.score > a.score || (b.score == a.score && len(b.e.Path) < len(a.e.Path)) {
+				scoredEntries[i], scoredEntries[j] = scoredEntries[j], scoredEntries[i]
+			}
+		}
+	}
+	var b strings.Builder
+	n := limit
+	if n > len(scoredEntries) {
+		n = len(scoredEntries)
+	}
+	for i := 0; i < n; i++ {
+		e := scoredEntries[i].e
 		if e.IsDir {
 			b.WriteString("[DIR] ")
 		} else {
@@ -191,5 +314,42 @@ func summarizeTreeHint(entries []workspace.TreeEntry) string {
 		b.WriteString(e.Path)
 		b.WriteString("\n")
 	}
+	if len(scoredEntries) > n {
+		b.WriteString("…\n")
+	}
 	return b.String()
+}
+
+func tokenizeQuery(q string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(q), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r >= 0x4e00)
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if len([]rune(f)) < 2 || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return out
+}
+
+func scorePath(path string, tokens []string) int {
+	lower := strings.ToLower(path)
+	score := 0
+	for _, t := range tokens {
+		if strings.Contains(lower, t) {
+			score += 3
+		}
+	}
+	return score
+}
+
+func summarizeTreeHint(entries []workspace.TreeEntry) string {
+	return RankedTreeHint(entries, "", 40)
 }

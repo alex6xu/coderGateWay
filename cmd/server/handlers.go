@@ -17,6 +17,7 @@ import (
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/agent/memory"
 	"github.com/alex/codegateway/internal/agent/promptctx"
+	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -276,9 +277,10 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		resp.Usage.Normalize()
 
 		// Log usage
-		logUsage(database, accountID, channel, req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		logUsage(database, accountID, channel, req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
 
 		c.JSON(http.StatusOK, resp)
 	}
@@ -329,6 +331,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 			Mode        string `json:"mode"`  // "coder" for code development, empty for general chat
 			Model       string `json:"model"` // optional model override
 			WorkspaceID string `json:"workspace_id"`
+			Stream      bool   `json:"stream"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -342,7 +345,6 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 			platform = "coder"
 		}
 
-		// Create or get session (owned by account)
 		sessionID := req.SessionID
 		if sessionID == "" {
 			sessionID = uuid.New().String()
@@ -351,28 +353,25 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				VALUES (?, ?, ?, ?, 0, ?, ?)
 			`, sessionID, accountID, req.Message[:min(50, len(req.Message))], platform, time.Now(), time.Now())
 			if err != nil {
-				// Continue anyway, session might already exist
+				// Continue anyway
 			}
 		} else if !sessionOwnedBy(database, sessionID, accountID) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 			return
 		}
 
-		// Save user message
 		userMsgID := uuid.New().String()
 		database.Exec(`
 			INSERT INTO messages (id, session_id, role, content, created_at)
 			VALUES (?, ?, 'user', ?, ?)
 		`, userMsgID, sessionID, req.Message, time.Now())
 
-		// Find a suitable model within this account's channels
 		modelName := cfg.Agent.DefaultModel
 		if req.Model != "" {
 			modelName = req.Model
 		}
 		channel, err := findChannelForModel(database, accountID, modelName)
 		if err != nil {
-			// Try any available channel for this account
 			channel, err = findAnyChannel(database, accountID)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel"})
@@ -381,8 +380,8 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		}
 
 		modelName = resolveModelForChannel(channel, modelName)
-		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d) workspace=%s",
-			accountID, sessionID, mode, modelName, channel.Name, channel.Type, req.WorkspaceID)
+		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d) workspace=%s stream=%v",
+			accountID, sessionID, mode, modelName, channel.Name, channel.Type, req.WorkspaceID, req.Stream)
 
 		prov, err := createProviderFromChannel(channel)
 		if err != nil {
@@ -393,26 +392,77 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		temperature := cfg.Agent.Temperature
 		maxTokens := cfg.Agent.MaxTokens
 		if maxTokens <= 0 || maxTokens > 16000 {
-			// Guard against misconfigured "context window" values used as completion cap
 			maxTokens = 4096
 		}
+
+		var emit func(AgentEvent)
+		var flusher http.Flusher
+		if req.Stream {
+			c.Header("Content-Type", "text/event-stream")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			var okFlush bool
+			flusher, okFlush = c.Writer.(http.Flusher)
+			if !okFlush {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+				return
+			}
+			emit = func(ev AgentEvent) {
+				if ev.Session == "" {
+					ev.Session = sessionID
+				}
+				if ev.Model == "" {
+					ev.Model = modelName
+				}
+				data, err := json.Marshal(ev)
+				if err != nil {
+					return
+				}
+				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+			emit(AgentEvent{Type: "meta", Session: sessionID, Model: modelName})
+		}
+
 		responseContent := ""
 		var usage provider.Usage
 		var toolSteps []map[string]string
 
 		extraPrefix := ""
 		system := chatSystemPrompt(modelName, mode)
+		projectID := ""
+		toolsCost := 0
+
 		if mode == "coder" && req.WorkspaceID != "" && workspaceMgr != nil {
 			ws, werr := workspaceMgr.Get(accountID, req.WorkspaceID)
 			if werr != nil {
+				if emit != nil {
+					emit(AgentEvent{Type: "error", Content: "workspace not found"})
+					fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+					flusher.Flush()
+					return
+				}
 				c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
 				return
 			}
-			tree, _ := workspaceMgr.ListTree(ws, ".", false)
-			if hint := summarizeTreeHint(tree); hint != "" {
-				extraPrefix = "Project files (sample):\n" + hint
+			projectID = ws.ID
+			tree, _ := workspaceMgr.ListTree(ws, ".", true)
+			hintLimit := cfg.Agent.TreeHintLimit
+			if hintLimit <= 0 {
+				hintLimit = 40
+			}
+			if hint := RankedTreeHint(tree, req.Message, hintLimit); hint != "" {
+				extraPrefix = "Project files (ranked for this request):\n" + hint
 			}
 			system = coderSystemPrompt(modelName, ws.Name)
+
+			// Refresh project memory snapshot for FTS (upsert)
+			if cfg.Agent.MemoryConfig.Enabled && mem != nil {
+				_ = mem.UpsertProjectMemory(ws.ID, "Workspace "+ws.Name+" files:\n"+hintOrEmpty(tree, hintLimit))
+			}
+
+			registry := tool.NewChrootedRegistry(ws.RootPath)
+			toolsCost = promptctx.EstimateToolsSchema(toProviderTools(registry))
 
 			seed := promptctx.Build(database.DB, promptctx.Options{
 				System:          system,
@@ -420,8 +470,10 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				SessionID:       sessionID,
 				ExcludeMsgID:    userMsgID,
 				ExtraUserPrefix: extraPrefix,
+				ProjectID:       projectID,
 				Cfg:             cfg.Agent,
 				Memory:          mem,
+				ToolsSchemaCost: toolsCost,
 			})
 
 			responseContent, usage, toolSteps, err = runCoderAgent(
@@ -430,15 +482,19 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				modelName,
 				seed,
 				ws,
-				temperature,
-				maxTokens,
-				cfg.Agent.MaxIterations,
-				cfg.Agent.ToolResultMaxChars,
-				cfg.Agent.ToolResultKeepRecent,
+				coderOptions{
+					Temperature:        temperature,
+					MaxTokens:          maxTokens,
+					MaxIterations:      cfg.Agent.MaxIterations,
+					ToolResultMaxChars: cfg.Agent.ToolResultMaxChars,
+					ParallelReadonly:   cfg.Agent.ParallelReadonlyTools,
+					PromptCacheKey:     "cg-session-" + sessionID,
+					EnablePromptCache:  cfg.Agent.PromptCacheEnabled,
+					OnEvent:            emit,
+				},
 			)
 			_ = workspaceMgr.RefreshStats(ws)
 		} else {
-			// MiMo Free often rejects system prompts — keep lightweight path
 			var messages []provider.Message
 			if channel.Type == model.ChannelTypeMiMoFree {
 				messages = buildAgentMessages(channel, modelName, req.Message, mode)
@@ -448,56 +504,108 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 					UserMessage:  req.Message,
 					SessionID:    sessionID,
 					ExcludeMsgID: userMsgID,
+					ProjectID:    projectID,
 					Cfg:          cfg.Agent,
 					Memory:       mem,
 				})
 			}
-			var resp *provider.ChatCompletionResponse
-			resp, err = prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
+
+			chatReq := &provider.ChatCompletionRequest{
 				Model:       modelName,
 				Messages:    messages,
 				Temperature: &temperature,
 				MaxTokens:   &maxTokens,
-			})
-			if err == nil && resp != nil {
-				usage = resp.Usage
-				if len(resp.Choices) > 0 {
-					responseContent = resp.Choices[0].Message.Content
+			}
+			if cfg.Agent.PromptCacheEnabled {
+				provider.ApplyPromptCache(chatReq, "cg-session-"+sessionID)
+			}
+
+			if req.Stream && emit != nil {
+				chatReq.StreamOptions = &provider.StreamOptions{IncludeUsage: true}
+				chunks, serr := prov.ChatCompletionStream(c.Request.Context(), chatReq)
+				if serr != nil {
+					err = serr
+				} else {
+					var b strings.Builder
+					for chunk := range chunks {
+						if chunk.Usage != nil {
+							usage.Add(*chunk.Usage)
+						}
+						if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+							b.WriteString(chunk.Choices[0].Delta.Content)
+							emit(AgentEvent{Type: "delta", Content: chunk.Choices[0].Delta.Content})
+						}
+					}
+					responseContent = b.String()
+				}
+			} else {
+				var resp *provider.ChatCompletionResponse
+				resp, err = prov.ChatCompletion(c.Request.Context(), chatReq)
+				if err == nil && resp != nil {
+					usage = resp.Usage
+					usage.Normalize()
+					if len(resp.Choices) > 0 {
+						responseContent = resp.Choices[0].Message.Content
+					}
 				}
 			}
 		}
 
 		if err != nil {
+			if emit != nil {
+				emit(AgentEvent{Type: "error", Content: err.Error()})
+				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		// Save assistant message
 		assistantMsgID := uuid.New().String()
 		database.Exec(`
 			INSERT INTO messages (id, session_id, role, content, model, provider, tokens, created_at)
 			VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)
 		`, assistantMsgID, sessionID, responseContent, modelName, channel.Name, usage.TotalTokens, time.Now())
 
-		// Update session
 		database.Exec(`
 			UPDATE sessions SET message_count = message_count + 2, updated_at = ? WHERE id = ?
 		`, time.Now(), sessionID)
 
-		// Extractive memory checkpoint (no extra LLM spend)
 		if cfg.Agent.MemoryConfig.Enabled && mem != nil {
 			promptctx.MaybeCheckpoint(database.DB, mem, sessionID, cfg.Agent.SummarizeEveryTurns)
 		}
 
+		logUsage(database, accountID, channel, modelName, usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
+
+		if emit != nil {
+			emit(AgentEvent{
+				Type:      "done",
+				Content:   responseContent,
+				Usage:     &usage,
+				Session:   sessionID,
+				Model:     modelName,
+				ToolSteps: toolSteps,
+			})
+			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"response":     responseContent,
-			"session_id":   sessionID,
-			"model":        modelName,
-			"usage":        usage,
-			"workspace_id": req.WorkspaceID,
-			"tool_steps":   toolSteps,
+			"response":      responseContent,
+			"session_id":    sessionID,
+			"model":         modelName,
+			"usage":         usage,
+			"workspace_id":  req.WorkspaceID,
+			"tool_steps":    toolSteps,
+			"cached_tokens": usage.CachedTokens,
 		})
 	}
+}
+
+func hintOrEmpty(entries []workspace.TreeEntry, limit int) string {
+	return RankedTreeHint(entries, "", limit)
 }
 
 // ========== Session Handlers ==========
@@ -846,11 +954,21 @@ func maskKey(key string) string {
 	return key[:4] + "****" + key[len(key)-4:]
 }
 
-func logUsage(database *db.DB, accountID int64, channel *model.Channel, model string, promptTokens, completionTokens int) {
-	// Simple cost estimation
+func logUsage(database *db.DB, accountID int64, channel *model.Channel, model string, promptTokens, completionTokens int, cachedTokens ...int) {
 	costPerInputToken := 0.000003  // $3 per 1M tokens
 	costPerOutputToken := 0.000015 // $15 per 1M tokens
-	cost := float64(promptTokens)*costPerInputToken + float64(completionTokens)*costPerOutputToken
+	cached := 0
+	if len(cachedTokens) > 0 {
+		cached = cachedTokens[0]
+	}
+	// Cached input is typically billed at a discount (~10% of input); approximate.
+	billablePrompt := promptTokens - cached
+	if billablePrompt < 0 {
+		billablePrompt = 0
+	}
+	cost := float64(billablePrompt)*costPerInputToken +
+		float64(cached)*costPerInputToken*0.1 +
+		float64(completionTokens)*costPerOutputToken
 
 	database.Exec(`
 		INSERT INTO usage_logs (user_id, channel_id, model, prompt_tokens, completion_tokens, cost, latency, status, created_at)

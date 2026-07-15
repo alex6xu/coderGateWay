@@ -2,37 +2,22 @@ package provider
 
 import (
 	"context"
-	"fmt"
+	"strings"
 )
 
-// DeepSeekProvider implements the Provider interface for DeepSeek
+// DeepSeekProvider is OpenAI-compatible (including automatic prompt caching on DeepSeek).
 type DeepSeekProvider struct {
-	config *ProviderConfig
+	*OpenAIProvider
 }
 
-// NewDeepSeekProvider creates a new DeepSeek provider
+// NewDeepSeekProvider creates a DeepSeek provider backed by the OpenAI-compatible client.
 func NewDeepSeekProvider(config *ProviderConfig) *DeepSeekProvider {
-	return &DeepSeekProvider{config: config}
+	if config.BaseURL == "" {
+		config.BaseURL = "https://api.deepseek.com/v1"
+	}
+	return &DeepSeekProvider{OpenAIProvider: NewOpenAIProvider(config)}
 }
 
-// Name returns the provider name
-func (p *DeepSeekProvider) Name() string {
-	return p.config.Name
-}
-
-// ChatCompletion sends a chat completion request
-func (p *DeepSeekProvider) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	// TODO: Implement DeepSeek API
-	return nil, fmt.Errorf("deepseek provider not implemented yet")
-}
-
-// ChatCompletionStream sends a streaming chat completion request
-func (p *DeepSeekProvider) ChatCompletionStream(ctx context.Context, req *ChatCompletionRequest) (<-chan *ChatCompletionChunk, error) {
-	// TODO: Implement DeepSeek streaming API
-	return nil, fmt.Errorf("deepseek provider not implemented yet")
-}
-
-// ListModels returns available models
 func (p *DeepSeekProvider) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
 		"deepseek-chat",
@@ -41,16 +26,11 @@ func (p *DeepSeekProvider) ListModels(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
-// ValidateModel checks if a model is available
 func (p *DeepSeekProvider) ValidateModel(model string) bool {
-	for _, m := range []string{
-		"deepseek-chat",
-		"deepseek-coder",
-		"deepseek-reasoner",
-	} {
-		if m == model {
+	for _, m := range []string{"deepseek-chat", "deepseek-coder", "deepseek-reasoner"} {
+		if strings.EqualFold(m, model) {
 			return true
 		}
 	}
-	return false
+	return strings.HasPrefix(strings.ToLower(model), "deepseek-")
 }

@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,13 +82,21 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 
 	r.Register(&Tool{
 		Name:        "read_file",
-		Description: "Read a text file relative to the project root.",
+		Description: "Read a text file relative to the project root. Optional offset/limit select 1-based line ranges.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "Relative file path",
+				},
+				"offset": map[string]interface{}{
+					"type":        "integer",
+					"description": "1-based start line (optional)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "Max number of lines to return (optional)",
 				},
 			},
 			"required": []string{"path"},
@@ -102,10 +111,34 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 			if err != nil {
 				return "", err
 			}
-			if len(data) > 200_000 {
-				return string(data[:200_000]) + "\n...[truncated]", nil
+			text := string(data)
+			offset := intFromArg(args["offset"], 0)
+			limit := intFromArg(args["limit"], 0)
+			if offset > 0 || limit > 0 {
+				lines := strings.Split(text, "\n")
+				start := 0
+				if offset > 0 {
+					start = offset - 1
+					if start < 0 {
+						start = 0
+					}
+					if start > len(lines) {
+						start = len(lines)
+					}
+				}
+				end := len(lines)
+				if limit > 0 && start+limit < end {
+					end = start + limit
+				}
+				text = strings.Join(lines[start:end], "\n")
+				if end < len(lines) {
+					text += fmt.Sprintf("\n…[%d more lines]", len(lines)-end)
+				}
 			}
-			return string(data), nil
+			if len(text) > 200_000 {
+				return text[:200_000] + "\n...[truncated]", nil
+			}
+			return text, nil
 		},
 	})
 
@@ -272,4 +305,21 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 			return text, nil
 		},
 	})
+}
+
+func intFromArg(v interface{}, def int) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err == nil {
+			return int(i)
+		}
+	}
+	return def
 }

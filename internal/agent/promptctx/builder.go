@@ -2,8 +2,10 @@ package promptctx
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/alex/codegateway/internal/agent/memory"
@@ -18,8 +20,11 @@ type Options struct {
 	SessionID       string
 	ExcludeMsgID    string
 	ExtraUserPrefix string // e.g. workspace tree hint
+	ProjectID       string // workspace/project id for project-scoped memory
 	Cfg             config.AgentConfig
 	Memory          *memory.MemoryService
+	// ToolsSchemaCost is an optional precomputed token estimate for tools JSON.
+	ToolsSchemaCost int
 }
 
 type storedMsg struct {
@@ -28,14 +33,40 @@ type storedMsg struct {
 	Content string
 }
 
-// EstimateTokens roughly estimates tokens from text.
+// EstimateTokens roughly estimates tokens with CJK awareness.
 func EstimateTokens(s string) int {
-	n := utf8.RuneCountInString(s)
-	if n == 0 {
+	if s == "" {
 		return 0
 	}
-	// Blend Latin (~4 chars/token) and CJK (~1.5–2 chars/token)
-	return (n + 2) / 3
+	latin, cjk, other := 0, 0, 0
+	for _, r := range s {
+		switch {
+		case unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul):
+			cjk++
+		case r <= 0x7f:
+			latin++
+		default:
+			other++
+		}
+	}
+	// ~4 Latin chars/token, ~1.5–2 CJK chars/token
+	return (latin+3)/4 + (cjk*2+2)/3 + (other+2)/3
+}
+
+// EstimateToolsSchema estimates tokens for the tools array sent to the model.
+func EstimateToolsSchema(tools []provider.Tool) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	b, err := json.Marshal(tools)
+	if err != nil {
+		n := 0
+		for _, t := range tools {
+			n += EstimateTokens(t.Function.Name) + EstimateTokens(t.Function.Description) + 40
+		}
+		return n
+	}
+	return EstimateTokens(string(b))
 }
 
 // Build assembles LLM messages in a prefix-cache-friendly layout:
@@ -43,9 +74,8 @@ func EstimateTokens(s string) int {
 //	stable prefix: fixed system → session checkpoint → append-only history
 //	variable suffix: current user (workspace hint + FTS retrieval + request)
 //
-// FTS hits are never inserted between system and history (that would bust the
-// entire cached prefix every turn). History after a checkpoint cutoff only grows
-// by appending until the next infrequent fold (MaybeCheckpoint).
+// When history exceeds turn/token budget, older live messages are folded into the
+// checkpoint (advancing cutoff) instead of silently sliding the cached prefix.
 func Build(db *sql.DB, opt Options) []provider.Message {
 	budget := opt.Cfg.ContextBudgetTokens
 	if budget <= 0 {
@@ -59,7 +89,6 @@ func Build(db *sql.DB, opt Options) []provider.Message {
 	used := 0
 	out := make([]provider.Message, 0, maxTurns+4)
 
-	// --- Stable prefix -------------------------------------------------------
 	system := strings.TrimSpace(opt.System)
 	if system != "" {
 		out = append(out, provider.Message{Role: "system", Content: system})
@@ -82,19 +111,68 @@ func Build(db *sql.DB, opt Options) []provider.Message {
 		}
 	}
 
-	history := loadHistory(db, opt.SessionID, opt.ExcludeMsgID)
-	if cutoffID != "" {
-		history = historyAfter(history, cutoffID)
-	}
-
-	// Soft cap: keep a contiguous suffix. Prefer not rewriting message bodies so
-	// previously cached history tokens stay byte-identical across turns.
 	keep := maxTurns * 2
+	fetchLimit := keep * 3
+	if fetchLimit < 48 {
+		fetchLimit = 48
+	}
+	history := loadHistory(db, opt.SessionID, opt.ExcludeMsgID, cutoffID, fetchLimit)
+
+	reserve := EstimateTokens(opt.UserMessage) + EstimateTokens(opt.ExtraUserPrefix) + 400 + opt.ToolsSchemaCost
+	needFold := false
 	if keep > 0 && len(history) > keep {
-		history = history[len(history)-keep:]
+		needFold = true
+	}
+	for !needFold && len(history) > 0 {
+		cost := 0
+		for _, m := range history {
+			cost += EstimateTokens(m.Content) + 4
+		}
+		if used+cost+reserve <= budget {
+			break
+		}
+		needFold = true
+		break
 	}
 
-	reserve := EstimateTokens(opt.UserMessage) + EstimateTokens(opt.ExtraUserPrefix) + 400
+	if needFold && opt.Memory != nil && opt.SessionID != "" {
+		keepN := keep
+		if keepN <= 0 {
+			keepN = 8
+		}
+		if len(history) > keepN {
+			fold := history[:len(history)-keepN]
+			history = history[len(history)-keepN:]
+			FoldMessages(opt.Memory, opt.SessionID, fold)
+			hasCP := false
+			for _, m := range out {
+				if m.Role == "system" && strings.Contains(m.Content, "Session checkpoint") {
+					hasCP = true
+					break
+				}
+			}
+			if !hasCP {
+				if cp, err := opt.Memory.GetSessionCheckpoint(opt.SessionID); err == nil && cp != nil {
+					text := strings.TrimSpace(cp.Content)
+					if text != "" {
+						msg := "Session checkpoint (stable summary of earlier turns):\n" + text
+						cost := EstimateTokens(msg)
+						if used+cost < budget-800 {
+							cpMsg := provider.Message{Role: "system", Content: msg}
+							if len(out) >= 1 && out[0].Role == "system" {
+								out = append([]provider.Message{out[0], cpMsg}, out[1:]...)
+							} else {
+								out = append([]provider.Message{cpMsg}, out...)
+							}
+							used += cost
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Final soft trim only if still over budget after fold (should be rare).
 	for len(history) > 0 {
 		cost := 0
 		for _, m := range history {
@@ -103,7 +181,6 @@ func Build(db *sql.DB, opt Options) []provider.Message {
 		if used+cost+reserve <= budget {
 			break
 		}
-		// Drop oldest whole messages only (never rewrite remaining bodies).
 		history = history[1:]
 	}
 
@@ -116,7 +193,6 @@ func Build(db *sql.DB, opt Options) []provider.Message {
 		used += EstimateTokens(m.Content) + 4
 	}
 
-	// --- Variable suffix (current user turn) ---------------------------------
 	userContent := buildUserSuffix(opt)
 	out = append(out, provider.Message{Role: "user", Content: userContent})
 	return out
@@ -128,17 +204,19 @@ func buildUserSuffix(opt Options) string {
 		parts = append(parts, p)
 	}
 
-	// Query-dependent retrieval belongs here so it does not bust the stable prefix.
-	if opt.Cfg.MemoryConfig.Enabled && opt.Memory != nil && opt.SessionID != "" {
+	if opt.Cfg.MemoryConfig.Enabled && opt.Memory != nil {
+		if opt.Cfg.MemoryConfig.ReconcileOnSearch {
+			_, _ = opt.Memory.Reconcile()
+		}
 		limit := opt.Cfg.MemoryConfig.MaxSnippets
 		if limit <= 0 {
 			limit = 5
 		}
-		hits, _ := opt.Memory.SearchSessionRelevant(opt.SessionID, opt.UserMessage, limit)
+		hits, _ := opt.Memory.SearchRelevant(opt.SessionID, opt.ProjectID, opt.UserMessage, limit, opt.Cfg.MemoryConfig.ScoreFloor)
 		var lines []string
 		for i, h := range hits {
 			if h == nil || h.Type == "checkpoint" {
-				continue // checkpoint already in stable prefix
+				continue
 			}
 			snippet := strings.TrimSpace(h.Content)
 			if snippet == "" {
@@ -158,95 +236,12 @@ func buildUserSuffix(opt Options) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func historyAfter(history []storedMsg, afterID string) []storedMsg {
-	if afterID == "" || len(history) == 0 {
-		return history
-	}
-	for i, m := range history {
-		if m.ID == afterID {
-			if i+1 >= len(history) {
-				return nil
-			}
-			return history[i+1:]
-		}
-	}
-	return history
-}
-
-func loadHistory(db *sql.DB, sessionID, excludeID string) []storedMsg {
-	if db == nil || sessionID == "" {
-		return nil
-	}
-	rows, err := db.Query(`
-		SELECT id, role, content FROM messages
-		WHERE session_id = ?
-		ORDER BY created_at ASC, rowid ASC
-	`, sessionID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	out := make([]storedMsg, 0)
-	for rows.Next() {
-		var m storedMsg
-		if err := rows.Scan(&m.ID, &m.Role, &m.Content); err != nil {
-			continue
-		}
-		if excludeID != "" && m.ID == excludeID {
-			continue
-		}
-		out = append(out, m)
-	}
-	return out
-}
-
-// MaybeCheckpoint writes an extractive session summary and advances the history
-// cutoff so subsequent Builds keep an append-only suffix (prefix-cache friendly).
-func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, every int) {
-	if mem == nil || sessionID == "" || db == nil {
+// FoldMessages merges extractive lines into the session checkpoint and advances cutoff.
+func FoldMessages(mem *memory.MemoryService, sessionID string, old []storedMsg) {
+	if mem == nil || sessionID == "" || len(old) == 0 {
 		return
 	}
-	if every <= 0 {
-		every = 10
-	}
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count); err != nil {
-		return
-	}
-	if count < every || count%every > 1 {
-		// Trigger near multiples of `every` (after a completed user+assistant pair)
-		return
-	}
-
-	history := loadHistory(db, sessionID, "")
-	if len(history) < 4 {
-		return
-	}
-
-	// Respect existing cutoff: only fold messages still in the live suffix.
-	var start int
-	if cp, err := mem.GetSessionCheckpoint(sessionID); err == nil && cp != nil && cp.AfterMsgID != "" {
-		for i, m := range history {
-			if m.ID == cp.AfterMsgID {
-				start = i + 1
-				break
-			}
-		}
-	}
-	live := history[start:]
-	if len(live) < 4 {
-		return
-	}
-
-	// Fold older half of the live suffix; keep a small recent tail append-only.
-	cut := len(live) - 4
-	if cut < 2 {
-		cut = len(live) / 2
-	}
-	old := live[:cut]
 	afterID := old[len(old)-1].ID
-
 	var b strings.Builder
 	if cp, err := mem.GetSessionCheckpoint(sessionID); err == nil && cp != nil {
 		prev := strings.TrimSpace(cp.Content)
@@ -276,6 +271,99 @@ func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, ev
 	_ = mem.UpsertSessionCheckpoint(sessionID, b.String(), afterID)
 }
 
+func loadHistory(db *sql.DB, sessionID, excludeID, afterID string, limit int) []storedMsg {
+	if db == nil || sessionID == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 64
+	}
+
+	// Fetch newest-first with LIMIT, then reverse for chronological order.
+	// When afterID is set, only messages after that id (by created_at/rowid) are wanted.
+	var rows *sql.Rows
+	var err error
+	if afterID != "" {
+		rows, err = db.Query(`
+			SELECT id, role, content FROM messages
+			WHERE session_id = ?
+			  AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ? LIMIT 1), 0)
+			ORDER BY created_at DESC, rowid DESC
+			LIMIT ?
+		`, sessionID, afterID, limit)
+		if err != nil {
+			rows, err = db.Query(`
+				SELECT id, role, content FROM messages
+				WHERE session_id = ?
+				ORDER BY created_at DESC, rowid DESC
+				LIMIT ?
+			`, sessionID, limit)
+		}
+	} else {
+		rows, err = db.Query(`
+			SELECT id, role, content FROM messages
+			WHERE session_id = ?
+			ORDER BY created_at DESC, rowid DESC
+			LIMIT ?
+		`, sessionID, limit)
+	}
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	tmp := make([]storedMsg, 0, limit)
+	for rows.Next() {
+		var m storedMsg
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content); err != nil {
+			continue
+		}
+		if excludeID != "" && m.ID == excludeID {
+			continue
+		}
+		tmp = append(tmp, m)
+	}
+	// Reverse to ascending
+	out := make([]storedMsg, 0, len(tmp))
+	for i := len(tmp) - 1; i >= 0; i-- {
+		out = append(out, tmp[i])
+	}
+	return out
+}
+
+// MaybeCheckpoint writes an extractive session summary and advances the history
+// cutoff so subsequent Builds keep an append-only suffix (prefix-cache friendly).
+func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, every int) {
+	if mem == nil || sessionID == "" || db == nil {
+		return
+	}
+	if every <= 0 {
+		every = 10
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count); err != nil {
+		return
+	}
+	if count < every || count%every > 1 {
+		return
+	}
+
+	var cutoffID string
+	if cp, err := mem.GetSessionCheckpoint(sessionID); err == nil && cp != nil {
+		cutoffID = cp.AfterMsgID
+	}
+	history := loadHistory(db, sessionID, "", cutoffID, every*3)
+	if len(history) < 4 {
+		return
+	}
+
+	cut := len(history) - 4
+	if cut < 2 {
+		cut = len(history) / 2
+	}
+	FoldMessages(mem, sessionID, history[:cut])
+}
+
 // TruncateToolResult caps a single new tool result without rewriting prior messages.
 func TruncateToolResult(content string, maxChars int) string {
 	if maxChars <= 0 {
@@ -288,8 +376,6 @@ func TruncateToolResult(content string, maxChars int) string {
 }
 
 // CompactToolMessages truncates older tool results in-place.
-// Prefer TruncateToolResult for new results; avoid calling this mid agent-loop
-// (rewriting earlier tool messages busts prompt prefix cache).
 func CompactToolMessages(messages []provider.Message, keepRecent, maxChars int) {
 	if keepRecent <= 0 {
 		keepRecent = 2

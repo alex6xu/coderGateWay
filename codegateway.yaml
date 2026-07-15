@@ -29,6 +29,9 @@ agent:
   # Infrequent fold of older turns into checkpoint (advances history cutoff)
   summarize_every_turns: 10
   temperature: 0.7
+  prompt_cache_enabled: true
+  parallel_readonly_tools: true
+  tree_hint_limit: 40
   
   memory:
     enabled: true

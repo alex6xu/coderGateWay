@@ -3,6 +3,7 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -129,18 +130,57 @@ func (s *MemoryService) Search(query string, scope string, scopeID string, limit
 
 // SearchSessionRelevant searches session + global memories for a query.
 func (s *MemoryService) SearchSessionRelevant(sessionID, query string, limit int) ([]*MemoryEntry, error) {
+	return s.SearchRelevant(sessionID, "", query, limit, 0)
+}
+
+// SearchRelevant searches session, optional project, and global memories.
+// scoreFloor filters weak FTS hits: SQLite FTS5 bm25 ranks are typically negative
+// (more negative = better). We convert to a 0..1-ish score as 1/(1+|rank|).
+func (s *MemoryService) SearchRelevant(sessionID, projectID, query string, limit int, scoreFloor float64) ([]*MemoryEntry, error) {
 	if limit <= 0 {
 		limit = 5
 	}
-	sessionHits, err := s.Search(query, "sessions", sessionID, limit)
-	if err != nil {
-		return nil, err
+	out := make([]*MemoryEntry, 0, limit)
+
+	appendFiltered := func(hits []*MemoryEntry) {
+		for _, h := range hits {
+			if h == nil || h.Type == "checkpoint" {
+				continue
+			}
+			if scoreFloor > 0 {
+				// FTS5 bm25 rank: more negative is better. Logistic → (0,1).
+				qual := 1.0 / (1.0 + math.Exp(h.Score))
+				if qual < scoreFloor {
+					continue
+				}
+			}
+			out = append(out, h)
+			if len(out) >= limit {
+				return
+			}
+		}
 	}
-	if len(sessionHits) >= limit {
-		return sessionHits, nil
+
+	if sessionID != "" {
+		hits, err := s.Search(query, "sessions", sessionID, limit*2)
+		if err != nil {
+			return nil, err
+		}
+		appendFiltered(hits)
 	}
-	globalHits, _ := s.Search(query, "global", "", limit-len(sessionHits))
-	return append(sessionHits, globalHits...), nil
+	if len(out) >= limit {
+		return out, nil
+	}
+	if projectID != "" {
+		hits, _ := s.Search(query, "projects", projectID, limit*2)
+		appendFiltered(hits)
+	}
+	if len(out) >= limit {
+		return out, nil
+	}
+	hits, _ := s.Search(query, "global", "", limit*2)
+	appendFiltered(hits)
+	return out, nil
 }
 
 // Recent returns recent memories
@@ -244,8 +284,15 @@ func (s *MemoryService) GetStats() (*MemoryStats, error) {
 
 // WriteProjectMemory writes a project memory
 func (s *MemoryService) WriteProjectMemory(projectID string, content string) error {
+	return s.UpsertProjectMemory(projectID, content)
+}
+
+// UpsertProjectMemory replaces project-scoped memory used for coder retrieval.
+func (s *MemoryService) UpsertProjectMemory(projectID string, content string) error {
+	path := fmt.Sprintf("projects/%s/memory.md", projectID)
+	_ = s.Delete(path)
 	return s.Write(&MemoryEntry{
-		Path:    fmt.Sprintf("projects/%s/memory.md", projectID),
+		Path:    path,
 		Scope:   "projects",
 		ScopeID: projectID,
 		Type:    "project",
