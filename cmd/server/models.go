@@ -29,7 +29,12 @@ type openaiModelList struct {
 
 func handleListModels(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		models, err := collectAvailableModels(c.Request.Context(), database)
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		models, err := collectAvailableModels(c.Request.Context(), database, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, openaiAPIError(
 				"failed to list models",
@@ -50,6 +55,11 @@ func handleListModels(database *db.DB) gin.HandlerFunc {
 // handleRetrieveModel implements OpenAI GET /v1/models/{model}.
 func handleRetrieveModel(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		modelID := strings.TrimPrefix(c.Param("model"), "/")
 		modelID = strings.TrimSpace(modelID)
 		if modelID == "" {
@@ -62,7 +72,7 @@ func handleRetrieveModel(database *db.DB) gin.HandlerFunc {
 			return
 		}
 
-		models, err := collectAvailableModels(c.Request.Context(), database)
+		models, err := collectAvailableModels(c.Request.Context(), database, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, openaiAPIError(
 				"failed to list models",
@@ -103,13 +113,13 @@ func openaiAPIError(message, errType, param, code string) gin.H {
 	return gin.H{"error": errObj}
 }
 
-func collectAvailableModels(ctx context.Context, database *db.DB) ([]openaiModel, error) {
+func collectAvailableModels(ctx context.Context, database *db.DB, accountID int64) ([]openaiModel, error) {
 	rows, err := database.Query(`
 		SELECT id, name, type, key, base_url, models, created_at
 		FROM channels
-		WHERE status = 1
+		WHERE status = 1 AND user_id = ?
 		ORDER BY priority DESC, weight DESC, id ASC
-	`)
+	`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +248,8 @@ func sanitizeModelIDs(ids []string) []string {
 
 func supportsUpstreamModelList(channelType int) bool {
 	switch channelType {
-	case model.ChannelTypeOpenAI, model.ChannelTypeDeepSeek, model.ChannelTypeMiMo, model.ChannelTypeOllama:
+	case model.ChannelTypeOpenAI, model.ChannelTypeDeepSeek, model.ChannelTypeMiMo, model.ChannelTypeOllama,
+		model.ChannelTypeAgnes, model.ChannelTypeGLM:
 		return true
 	default:
 		return false
@@ -259,6 +270,10 @@ func ownedByForChannelType(channelType int) string {
 		return "ollama"
 	case model.ChannelTypeMiMo, model.ChannelTypeMiMoFree, model.ChannelTypeMiMoCode:
 		return "mimo"
+	case model.ChannelTypeAgnes:
+		return "agnes"
+	case model.ChannelTypeGLM:
+		return "zhipu"
 	case model.ChannelTypeCustom:
 		return "custom"
 	default:

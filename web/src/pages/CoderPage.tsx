@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { apiFetch, useAccount } from '../context/AccountContext'
 
 interface Message {
   id: string
@@ -48,6 +49,7 @@ const quickTasks = [
 ]
 
 export default function CoderPage() {
+  const { currentAccount } = useAccount()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -59,7 +61,9 @@ export default function CoderPage() {
 
   useEffect(() => {
     fetchModels()
-  }, [])
+    setMessages([])
+    setSessionId('')
+  }, [currentAccount?.id])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -67,18 +71,20 @@ export default function CoderPage() {
 
   const fetchModels = async () => {
     try {
-      const response = await fetch('/v1/models')
+      const response = await apiFetch('/v1/models', {}, currentAccount?.id)
       if (!response.ok) return
       const data = await response.json()
       const list: ModelOption[] = (data.data || []).map((m: { id: string }) => ({ id: m.id }))
       setModels(list)
-      if (list.length > 0 && !selectedModel) {
+      if (list.length > 0) {
         const preferred =
           list.find((m) => m.id.includes('mimo-auto')) ||
           list.find((m) => m.id.includes('glm')) ||
           list.find((m) => m.id.includes('coder') || m.id.includes('code')) ||
           list[0]
         setSelectedModel(preferred.id)
+      } else {
+        setSelectedModel('')
       }
     } catch (error) {
       console.error('Failed to fetch models:', error)
@@ -110,16 +116,20 @@ export default function CoderPage() {
     setIsLoading(true)
 
     try {
-      const response = await fetch('/v1/agent/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: content,
-          session_id: sessionId,
-          mode: 'coder',
-          model: selectedModel || undefined,
-        }),
-      })
+      const response = await apiFetch(
+        '/v1/agent/chat',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: content,
+            session_id: sessionId,
+            mode: 'coder',
+            model: selectedModel || undefined,
+          }),
+        },
+        currentAccount?.id,
+      )
       const data = await response.json()
 
       if (data.session_id) {

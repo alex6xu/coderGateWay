@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { apiFetch, useAccount } from '../context/AccountContext'
 
 interface Session {
   id: string
@@ -21,18 +22,23 @@ interface Message {
 }
 
 export default function SessionsPage() {
+  const { currentAccount } = useAccount()
   const [sessions, setSessions] = useState<Session[]>([])
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    fetchSessions()
-  }, [])
+    if (currentAccount) {
+      setSelectedSession(null)
+      setMessages([])
+      fetchSessions()
+    }
+  }, [currentAccount?.id])
 
   const fetchSessions = async () => {
     try {
-      const response = await fetch('/v1/agent/sessions')
+      const response = await apiFetch('/v1/agent/sessions', {}, currentAccount?.id)
       if (response.ok) {
         const data = await response.json()
         setSessions(data.sessions || [])
@@ -46,7 +52,7 @@ export default function SessionsPage() {
     setLoading(true)
     setSelectedSession(sessionId)
     try {
-      const response = await fetch(`/v1/agent/sessions/${sessionId}`)
+      const response = await apiFetch(`/v1/agent/sessions/${sessionId}`, {}, currentAccount?.id)
       if (response.ok) {
         const data = await response.json()
         setMessages(data.messages || [])
@@ -77,7 +83,9 @@ export default function SessionsPage() {
       <div className={`border-r border-border ${selectedSession ? 'w-80' : 'flex-1'} overflow-auto`}>
         <div className="p-4 border-b border-border">
           <h2 className="text-base font-semibold text-foreground">Sessions</h2>
-          <p className="text-[13px] text-muted-foreground mt-0.5">{sessions.length} sessions</p>
+          <p className="text-[13px] text-muted-foreground mt-0.5">
+            {sessions.length} sessions · {currentAccount?.username || 'account'}
+          </p>
         </div>
 
         <div className="divide-y divide-border">

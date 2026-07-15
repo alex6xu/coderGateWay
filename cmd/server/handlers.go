@@ -23,10 +23,15 @@ import (
 
 func handleListChannels(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		rows, err := database.Query(`
-			SELECT id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, created_at, updated_at 
-			FROM channels ORDER BY id DESC
-		`)
+			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, created_at, updated_at 
+			FROM channels WHERE user_id = ? ORDER BY id DESC
+		`, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query channels"})
 			return
@@ -36,7 +41,7 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 		channels := make([]model.Channel, 0)
 		for rows.Next() {
 			var ch model.Channel
-			err := rows.Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.CreatedAt, &ch.UpdatedAt)
+			err := rows.Scan(&ch.ID, &ch.UserID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.CreatedAt, &ch.UpdatedAt)
 			if err != nil {
 				continue
 			}
@@ -51,6 +56,11 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 
 func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		var req struct {
 			Name         string `json:"name" binding:"required"`
 			Type         int    `json:"type" binding:"required"`
@@ -78,9 +88,9 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 
 		now := time.Now()
 		result, err := database.Exec(`
-			INSERT INTO channels (name, type, key, base_url, models, weight, priority, status, model_mapping, groups, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-		`, req.Name, req.Type, req.Key, req.BaseURL, req.Models, req.Weight, req.Priority, req.ModelMapping, req.Groups, now, now)
+			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, model_mapping, groups, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+		`, accountID, req.Name, req.Type, req.Key, req.BaseURL, req.Models, req.Weight, req.Priority, req.ModelMapping, req.Groups, now, now)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create channel"})
@@ -89,18 +99,29 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 
 		id, _ := result.LastInsertId()
 		c.JSON(http.StatusOK, gin.H{
-			"message": "channel created",
-			"id":      id,
+			"message":    "channel created",
+			"id":         id,
+			"account_id": accountID,
 		})
 	}
 }
 
 func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		id := c.Param("id")
 		channelID, err := strconv.ParseInt(id, 10, 64)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel id"})
+			return
+		}
+
+		if !channelOwnedBy(database, channelID, accountID) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
 
@@ -167,8 +188,8 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 			args = append(args, *req.Groups)
 		}
 
-		query += " WHERE id = ?"
-		args = append(args, channelID)
+		query += " WHERE id = ? AND user_id = ?"
+		args = append(args, channelID, accountID)
 
 		_, err = database.Exec(query, args...)
 		if err != nil {
@@ -182,6 +203,11 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 
 func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		id := c.Param("id")
 		channelID, err := strconv.ParseInt(id, 10, 64)
 		if err != nil {
@@ -189,9 +215,14 @@ func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 			return
 		}
 
-		_, err = database.Exec("DELETE FROM channels WHERE id = ?", channelID)
+		result, err := database.Exec("DELETE FROM channels WHERE id = ? AND user_id = ?", channelID, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete channel"})
+			return
+		}
+		affected, _ := result.RowsAffected()
+		if affected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
 
@@ -203,21 +234,26 @@ func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 
 func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		var req provider.ChatCompletionRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 			return
 		}
 
-		// Find a channel that supports this model
-		channel, err := findChannelForModel(database, req.Model)
+		// Find a channel that supports this model (scoped to account)
+		channel, err := findChannelForModel(database, accountID, req.Model)
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel for model: " + req.Model})
 			return
 		}
 
 		req.Model = resolveModelForChannel(channel, req.Model)
-		log.Printf("[chat] model=%s channel=%s(type=%d) stream=%v", req.Model, channel.Name, channel.Type, req.Stream)
+		log.Printf("[chat] account=%d model=%s channel=%s(type=%d) stream=%v", accountID, req.Model, channel.Name, channel.Type, req.Stream)
 
 		prov, err := createProviderFromChannel(channel)
 		if err != nil {
@@ -239,7 +275,7 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 		}
 
 		// Log usage
-		logUsage(database, channel, req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		logUsage(database, accountID, channel, req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
 		c.JSON(http.StatusOK, resp)
 	}
@@ -279,6 +315,11 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 
 func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		var req struct {
 			Message   string `json:"message" binding:"required"`
 			SessionID string `json:"session_id"`
@@ -297,17 +338,20 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 			platform = "coder"
 		}
 
-		// Create or get session
+		// Create or get session (owned by account)
 		sessionID := req.SessionID
 		if sessionID == "" {
 			sessionID = uuid.New().String()
 			_, err := database.Exec(`
-				INSERT INTO sessions (id, title, platform, message_count, created_at, updated_at)
-				VALUES (?, ?, ?, 0, ?, ?)
-			`, sessionID, req.Message[:min(50, len(req.Message))], platform, time.Now(), time.Now())
+				INSERT INTO sessions (id, user_id, title, platform, message_count, created_at, updated_at)
+				VALUES (?, ?, ?, ?, 0, ?, ?)
+			`, sessionID, accountID, req.Message[:min(50, len(req.Message))], platform, time.Now(), time.Now())
 			if err != nil {
 				// Continue anyway, session might already exist
 			}
+		} else if !sessionOwnedBy(database, sessionID, accountID) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
 		}
 
 		// Save user message
@@ -317,15 +361,15 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 			VALUES (?, ?, 'user', ?, ?)
 		`, userMsgID, sessionID, req.Message, time.Now())
 
-		// Find a suitable model
+		// Find a suitable model within this account's channels
 		modelName := cfg.Agent.DefaultModel
 		if req.Model != "" {
 			modelName = req.Model
 		}
-		channel, err := findChannelForModel(database, modelName)
+		channel, err := findChannelForModel(database, accountID, modelName)
 		if err != nil {
-			// Try any available channel
-			channel, err = findAnyChannel(database)
+			// Try any available channel for this account
+			channel, err = findAnyChannel(database, accountID)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel"})
 				return
@@ -333,7 +377,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		modelName = resolveModelForChannel(channel, modelName)
-		log.Printf("[chat/agent] session=%s mode=%s model=%s channel=%s(type=%d)", sessionID, mode, modelName, channel.Name, channel.Type)
+		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d)", accountID, sessionID, mode, modelName, channel.Name, channel.Type)
 
 		prov, err := createProviderFromChannel(channel)
 		if err != nil {
@@ -386,10 +430,15 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 
 func handleListSessions(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		rows, err := database.Query(`
 			SELECT id, title, platform, message_count, created_at, updated_at
-			FROM sessions ORDER BY updated_at DESC LIMIT 50
-		`)
+			FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 50
+		`, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query sessions"})
 			return
@@ -419,22 +468,27 @@ func handleListSessions(database *db.DB) gin.HandlerFunc {
 
 func handleGetSession(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		id := c.Param("id")
 
-		// Get session
+		// Get session (must belong to account)
 		var session struct {
-			ID            string
-			Title         string
-			Platform      string
-			MessageCount  int
-			CreatedAt     time.Time
-			UpdatedAt     time.Time
+			ID           string
+			Title        string
+			Platform     string
+			MessageCount int
+			CreatedAt    time.Time
+			UpdatedAt    time.Time
 		}
 
 		err := database.QueryRow(`
 			SELECT id, title, platform, message_count, created_at, updated_at
-			FROM sessions WHERE id = ?
-		`, id).Scan(&session.ID, &session.Title, &session.Platform, &session.MessageCount, &session.CreatedAt, &session.UpdatedAt)
+			FROM sessions WHERE id = ? AND user_id = ?
+		`, id, accountID).Scan(&session.ID, &session.Title, &session.Platform, &session.MessageCount, &session.CreatedAt, &session.UpdatedAt)
 
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
@@ -489,27 +543,37 @@ func handleGetSession(database *db.DB) gin.HandlerFunc {
 
 func handleGetStats(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
 		stats := map[string]interface{}{}
 
-		// Total sessions
+		// Total sessions for account
 		var totalSessions int
-		database.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&totalSessions)
+		database.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", accountID).Scan(&totalSessions)
 		stats["totalSessions"] = totalSessions
 
-		// Total messages
+		// Total messages for account sessions
 		var totalMessages int
-		database.QueryRow("SELECT COUNT(*) FROM messages").Scan(&totalMessages)
+		database.QueryRow(`
+			SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)
+		`, accountID).Scan(&totalMessages)
 		stats["totalMessages"] = totalMessages
 
-		// Active channels
+		// Active channels for account
 		var activeChannels int
-		database.QueryRow("SELECT COUNT(*) FROM channels WHERE status = 1").Scan(&activeChannels)
+		database.QueryRow("SELECT COUNT(*) FROM channels WHERE status = 1 AND user_id = ?", accountID).Scan(&activeChannels)
 		stats["activeChannels"] = activeChannels
 
-		// Total tokens and cost from usage_logs
+		// Total tokens and cost from usage_logs for account
 		var totalTokens int64
 		var totalCost float64
-		database.QueryRow("SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0), COALESCE(SUM(cost), 0) FROM usage_logs").Scan(&totalTokens, &totalCost)
+		database.QueryRow(`
+			SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0), COALESCE(SUM(cost), 0)
+			FROM usage_logs WHERE user_id = ?
+		`, accountID).Scan(&totalTokens, &totalCost)
 		stats["totalTokens"] = totalTokens
 		stats["totalCost"] = totalCost
 
@@ -519,11 +583,23 @@ func handleGetStats(database *db.DB) gin.HandlerFunc {
 
 // ========== Helper Functions ==========
 
-func findChannelForModel(database *db.DB, modelName string) (*model.Channel, error) {
+func channelOwnedBy(database *db.DB, channelID, accountID int64) bool {
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM channels WHERE id = ? AND user_id = ?", channelID, accountID).Scan(&count)
+	return count > 0
+}
+
+func sessionOwnedBy(database *db.DB, sessionID string, accountID int64) bool {
+	var count int
+	database.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ? AND user_id = ?", sessionID, accountID).Scan(&count)
+	return count > 0
+}
+
+func findChannelForModel(database *db.DB, accountID int64, modelName string) (*model.Channel, error) {
 	rows, err := database.Query(`
 		SELECT id, name, type, key, base_url, models, weight, priority, status
-		FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC
-	`)
+		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC
+	`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -624,12 +700,12 @@ func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode str
 	}
 }
 
-func findAnyChannel(database *db.DB) (*model.Channel, error) {
+func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
 	var ch model.Channel
 	err := database.QueryRow(`
 		SELECT id, name, type, key, base_url, models, weight, priority, status
-		FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC LIMIT 1
-	`).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
+		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC LIMIT 1
+	`, accountID).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
 
 	if err != nil {
 		return nil, err
@@ -696,16 +772,16 @@ func maskKey(key string) string {
 	return key[:4] + "****" + key[len(key)-4:]
 }
 
-func logUsage(database *db.DB, channel *model.Channel, model string, promptTokens, completionTokens int) {
+func logUsage(database *db.DB, accountID int64, channel *model.Channel, model string, promptTokens, completionTokens int) {
 	// Simple cost estimation
-	costPerInputToken := 0.000003   // $3 per 1M tokens
-	costPerOutputToken := 0.000015  // $15 per 1M tokens
+	costPerInputToken := 0.000003  // $3 per 1M tokens
+	costPerOutputToken := 0.000015 // $15 per 1M tokens
 	cost := float64(promptTokens)*costPerInputToken + float64(completionTokens)*costPerOutputToken
 
 	database.Exec(`
-		INSERT INTO usage_logs (channel_id, model, prompt_tokens, completion_tokens, cost, latency, status, created_at)
-		VALUES (?, ?, ?, ?, ?, 0, 1, ?)
-	`, channel.ID, model, promptTokens, completionTokens, cost, time.Now())
+		INSERT INTO usage_logs (user_id, channel_id, model, prompt_tokens, completion_tokens, cost, latency, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
+	`, accountID, channel.ID, model, promptTokens, completionTokens, cost, time.Now())
 }
 
 func min(a, b int) int {
@@ -729,18 +805,6 @@ func handleGemini(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func handleListUsers(database *db.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"users": []interface{}{}})
-	}
-}
-
-func handleCreateUser(database *db.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "user management not implemented yet"})
-	}
-}
-
 func handleListTokens(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"tokens": []interface{}{}})
@@ -755,18 +819,18 @@ func handleCreateToken(database *db.DB) gin.HandlerFunc {
 
 // ========== Message Processing ==========
 
-func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string) string {
+func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string, accountID int64) string {
 	modelName := cfg.Agent.DefaultModel
-	channel, err := findChannelForModel(database, modelName)
+	channel, err := findChannelForModel(database, accountID, modelName)
 	if err != nil {
-		channel, err = findAnyChannel(database)
+		channel, err = findAnyChannel(database, accountID)
 		if err != nil {
 			return "Error: No available channel. Please add a channel first."
 		}
 	}
 
 	modelName = resolveModelForChannel(channel, modelName)
-	log.Printf("[chat/ws] session=%s model=%s channel=%s(type=%d)", sessionID, modelName, channel.Name, channel.Type)
+	log.Printf("[chat/ws] account=%d session=%s model=%s channel=%s(type=%d)", accountID, sessionID, modelName, channel.Name, channel.Type)
 
 	prov, err := createProviderFromChannel(channel)
 	if err != nil {
@@ -792,21 +856,21 @@ func processMessage(database *db.DB, cfg *config.Config, sessionID string, messa
 	}
 
 	// Save messages to database
-	saveMessage(database, sessionID, "user", message, "", "", 0)
-	saveMessage(database, sessionID, "assistant", responseContent, modelName, channel.Name, resp.Usage.TotalTokens)
+	saveMessage(database, accountID, sessionID, "user", message, "", "", 0)
+	saveMessage(database, accountID, sessionID, "assistant", responseContent, modelName, channel.Name, resp.Usage.TotalTokens)
 
 	return responseContent
 }
 
-func saveMessage(database *db.DB, sessionID, role, content, model, provider string, tokens int) {
-	// Ensure session exists
+func saveMessage(database *db.DB, accountID int64, sessionID, role, content, model, provider string, tokens int) {
+	// Ensure session exists for this account
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", sessionID).Scan(&count)
 	if count == 0 {
 		database.Exec(`
-			INSERT INTO sessions (id, title, platform, message_count, created_at, updated_at)
-			VALUES (?, ?, 'web', 0, ?, ?)
-		`, sessionID, content[:min(50, len(content))], time.Now(), time.Now())
+			INSERT INTO sessions (id, user_id, title, platform, message_count, created_at, updated_at)
+			VALUES (?, ?, ?, 'web', 0, ?, ?)
+		`, sessionID, accountID, content[:min(50, len(content))], time.Now(), time.Now())
 	}
 
 	// Save message

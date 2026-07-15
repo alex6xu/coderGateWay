@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
 	"github.com/gin-gonic/gin"
@@ -31,8 +32,19 @@ func Run() error {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
-	// Initialize default channels
-	initDefaultChannels(database, cfg)
+	// Ensure default admin account exists, then assign orphaned data
+	accountMgr := account.NewManager(database.DB)
+	defaultAccount, err := accountMgr.EnsureDefault()
+	if err != nil {
+		return fmt.Errorf("failed to ensure default account: %w", err)
+	}
+	if err := assignOrphanedData(database, defaultAccount.ID); err != nil {
+		log.Printf("Warning: failed to assign orphaned data: %v", err)
+	}
+	log.Printf("Default account ready: %s (id=%d)", defaultAccount.Username, defaultAccount.ID)
+
+	// Initialize default channels for the default account
+	initDefaultChannels(database, cfg, defaultAccount.ID)
 
 	// Setup Gin router
 	r := gin.Default()
@@ -42,7 +54,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub)
+	setupRoutes(r, database, cfg, hub, accountMgr)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -63,22 +75,25 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Account-ID")
 		c.Header("Access-Control-Allow-Credentials", "true")
 		// CSP header for development
 		c.Header("Content-Security-Policy", "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
-		
+
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
 		}
 		c.Next()
 	})
+
+	// Resolve active account for all requests
+	r.Use(accountMiddleware(accountMgr))
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
@@ -123,8 +138,17 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 			admin.PUT("/channels/:id", handleUpdateChannel(database))
 			admin.DELETE("/channels/:id", handleDeleteChannel(database))
 
-			admin.GET("/users", handleListUsers(database))
-			admin.POST("/users", handleCreateUser(database))
+			// Accounts (per-user channel/session isolation)
+			admin.GET("/accounts", handleListAccounts(accountMgr))
+			admin.POST("/accounts", handleCreateAccount(accountMgr))
+			admin.GET("/accounts/current", handleGetCurrentAccount(accountMgr))
+			admin.GET("/accounts/:id", handleGetAccount(accountMgr))
+			admin.PUT("/accounts/:id", handleUpdateAccount(accountMgr))
+			admin.DELETE("/accounts/:id", handleDeleteAccount(accountMgr))
+
+			// Legacy user aliases
+			admin.GET("/users", handleListUsers(accountMgr))
+			admin.POST("/users", handleCreateUser(accountMgr))
 
 			admin.GET("/tokens", handleListTokens(database))
 			admin.POST("/tokens", handleCreateToken(database))
@@ -132,10 +156,13 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 	}
 }
 
-func initDefaultChannels(database *db.DB, cfg *config.Config) {
+func initDefaultChannels(database *db.DB, cfg *config.Config, accountID int64) {
 	for _, ch := range cfg.Gateway.DefaultChannels {
 		var exists int
-		err := database.QueryRow("SELECT COUNT(*) FROM channels WHERE name = ?", ch.Name).Scan(&exists)
+		err := database.QueryRow(
+			"SELECT COUNT(*) FROM channels WHERE name = ? AND user_id = ?",
+			ch.Name, accountID,
+		).Scan(&exists)
 		if err != nil {
 			log.Printf("Failed to check channel %s: %v", ch.Name, err)
 			continue
@@ -145,13 +172,26 @@ func initDefaultChannels(database *db.DB, cfg *config.Config) {
 		}
 
 		_, err = database.Exec(`
-			INSERT INTO channels (name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'default', datetime('now'), datetime('now'))
-		`, ch.Name, ch.Type, ch.Key, ch.BaseURL, ch.Models, ch.Weight, ch.Priority)
+			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'default', datetime('now'), datetime('now'))
+		`, accountID, ch.Name, ch.Type, ch.Key, ch.BaseURL, ch.Models, ch.Weight, ch.Priority)
 		if err != nil {
 			log.Printf("Failed to create default channel %s: %v", ch.Name, err)
 		} else {
-			log.Printf("Created default channel: %s", ch.Name)
+			log.Printf("Created default channel: %s (account=%d)", ch.Name, accountID)
 		}
 	}
+}
+
+func assignOrphanedData(database *db.DB, accountID int64) error {
+	if _, err := database.Exec("UPDATE channels SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {
+		return err
+	}
+	if _, err := database.Exec("UPDATE sessions SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {
+		return err
+	}
+	if _, err := database.Exec("UPDATE usage_logs SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {
+		return err
+	}
+	return nil
 }
