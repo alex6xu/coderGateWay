@@ -15,6 +15,8 @@ import (
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/model"
 	"github.com/alex/codegateway/internal/provider"
+	"github.com/alex/codegateway/internal/agent/memory"
+	"github.com/alex/codegateway/internal/agent/promptctx"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -314,7 +316,7 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 
 // ========== Agent Chat Handler ==========
 
-func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager) gin.HandlerFunc {
+func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager, mem *memory.MemoryService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -390,10 +392,16 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 
 		temperature := cfg.Agent.Temperature
 		maxTokens := cfg.Agent.MaxTokens
+		if maxTokens <= 0 || maxTokens > 16000 {
+			// Guard against misconfigured "context window" values used as completion cap
+			maxTokens = 4096
+		}
 		responseContent := ""
 		var usage provider.Usage
 		var toolSteps []map[string]string
 
+		extraPrefix := ""
+		system := chatSystemPrompt(modelName, mode)
 		if mode == "coder" && req.WorkspaceID != "" && workspaceMgr != nil {
 			ws, werr := workspaceMgr.Get(accountID, req.WorkspaceID)
 			if werr != nil {
@@ -401,25 +409,48 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				return
 			}
 			tree, _ := workspaceMgr.ListTree(ws, ".", false)
-			enriched := req.Message
 			if hint := summarizeTreeHint(tree); hint != "" {
-				enriched = "Project files (sample):\n" + hint + "\n\nUser request:\n" + req.Message
+				extraPrefix = "Project files (sample):\n" + hint
 			}
+			system = coderSystemPrompt(modelName, ws.Name)
+
+			seed := promptctx.Build(database.DB, promptctx.Options{
+				System:          system,
+				UserMessage:     req.Message,
+				SessionID:       sessionID,
+				ExcludeMsgID:    userMsgID,
+				ExtraUserPrefix: extraPrefix,
+				Cfg:             cfg.Agent,
+				Memory:          mem,
+			})
+
 			responseContent, usage, toolSteps, err = runCoderAgent(
 				c.Request.Context(),
 				prov,
 				modelName,
-				enriched,
+				seed,
 				ws,
 				temperature,
 				maxTokens,
 				cfg.Agent.MaxIterations,
+				cfg.Agent.ToolResultMaxChars,
+				cfg.Agent.ToolResultKeepRecent,
 			)
 			_ = workspaceMgr.RefreshStats(ws)
 		} else {
-			messages := buildAgentMessages(channel, modelName, req.Message, mode)
-			if mode == "coder" && req.WorkspaceID == "" {
-				messages = coderFallbackPrompt(modelName, req.Message)
+			// MiMo Free often rejects system prompts — keep lightweight path
+			var messages []provider.Message
+			if channel.Type == model.ChannelTypeMiMoFree {
+				messages = buildAgentMessages(channel, modelName, req.Message, mode)
+			} else {
+				messages = promptctx.Build(database.DB, promptctx.Options{
+					System:       system,
+					UserMessage:  req.Message,
+					SessionID:    sessionID,
+					ExcludeMsgID: userMsgID,
+					Cfg:          cfg.Agent,
+					Memory:       mem,
+				})
 			}
 			var resp *provider.ChatCompletionResponse
 			resp, err = prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
@@ -452,6 +483,11 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		database.Exec(`
 			UPDATE sessions SET message_count = message_count + 2, updated_at = ? WHERE id = ?
 		`, time.Now(), sessionID)
+
+		// Extractive memory checkpoint (no extra LLM spend)
+		if cfg.Agent.MemoryConfig.Enabled && mem != nil {
+			promptctx.MaybeCheckpoint(database.DB, mem, sessionID, cfg.Agent.SummarizeEveryTurns)
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"response":     responseContent,

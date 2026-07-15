@@ -36,19 +36,25 @@ type RedisConfig struct {
 }
 
 type AgentConfig struct {
-	DefaultModel   string        `yaml:"default_model"`
-	MaxIterations  int           `yaml:"max_iterations"`
-	MaxTokens      int           `yaml:"max_tokens"`
-	Temperature    float64       `yaml:"temperature"`
-	MemoryConfig   MemoryConfig  `yaml:"memory"`
-	SkillsConfig   SkillsConfig  `yaml:"skills"`
-	CronConfig     CronConfig    `yaml:"cron"`
+	DefaultModel          string       `yaml:"default_model"`
+	MaxIterations         int          `yaml:"max_iterations"`
+	MaxTokens             int          `yaml:"max_tokens"` // completion / generation cap
+	ContextBudgetTokens   int          `yaml:"context_budget_tokens"`
+	HistoryMaxTurns       int          `yaml:"history_max_turns"`
+	ToolResultMaxChars    int          `yaml:"tool_result_max_chars"`
+	ToolResultKeepRecent  int          `yaml:"tool_result_keep_recent"`
+	SummarizeEveryTurns   int          `yaml:"summarize_every_turns"`
+	Temperature           float64      `yaml:"temperature"`
+	MemoryConfig          MemoryConfig `yaml:"memory"`
+	SkillsConfig          SkillsConfig `yaml:"skills"`
+	CronConfig            CronConfig   `yaml:"cron"`
 }
 
 type MemoryConfig struct {
-	Enabled            bool    `yaml:"enabled"`
-	ReconcileOnSearch  bool    `yaml:"reconcile_on_search"`
-	ScoreFloor         float64 `yaml:"score_floor"`
+	Enabled           bool    `yaml:"enabled"`
+	ReconcileOnSearch bool    `yaml:"reconcile_on_search"`
+	ScoreFloor        float64 `yaml:"score_floor"`
+	MaxSnippets       int     `yaml:"max_snippets"`
 }
 
 type SkillsConfig struct {
@@ -181,14 +187,20 @@ func defaultConfig() *Config {
 			DB:       0,
 		},
 		Agent: AgentConfig{
-			DefaultModel:  "gpt-4o",
-			MaxIterations: 50,
-			MaxTokens:     128000,
-			Temperature:   0.7,
+			DefaultModel:         "gpt-4o",
+			MaxIterations:        50,
+			MaxTokens:            4096,
+			ContextBudgetTokens:  8000,
+			HistoryMaxTurns:      8,
+			ToolResultMaxChars:   4000,
+			ToolResultKeepRecent: 2,
+			SummarizeEveryTurns:  10,
+			Temperature:          0.7,
 			MemoryConfig: MemoryConfig{
 				Enabled:           true,
 				ReconcileOnSearch: true,
 				ScoreFloor:        0.15,
+				MaxSnippets:       5,
 			},
 			SkillsConfig: SkillsConfig{
 				BuiltinPath: "./skills",

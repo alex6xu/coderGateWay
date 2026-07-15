@@ -3,6 +3,8 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,12 +12,12 @@ import (
 
 // MemoryEntry represents a memory entry
 type MemoryEntry struct {
-	ID      string `json:"id"`
-	Path    string `json:"path"`
-	Scope   string `json:"scope"`
-	ScopeID string `json:"scope_id"`
-	Type    string `json:"type"`
-	Content string `json:"content"`
+	ID      string  `json:"id"`
+	Path    string  `json:"path"`
+	Scope   string  `json:"scope"`
+	ScopeID string  `json:"scope_id"`
+	Type    string  `json:"type"`
+	Content string  `json:"content"`
 	Score   float64 `json:"score,omitempty"`
 }
 
@@ -27,6 +29,36 @@ type MemoryService struct {
 // NewMemoryService creates a new memory service
 func NewMemoryService(db *sql.DB) *MemoryService {
 	return &MemoryService{db: db}
+}
+
+var ftsTokenRe = regexp.MustCompile(`[\p{L}\p{N}_]+`)
+
+// SanitizeFTSQuery converts free text into a safe FTS5 MATCH query.
+func SanitizeFTSQuery(query string) string {
+	tokens := ftsTokenRe.FindAllString(query, 16)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	seen := map[string]bool{}
+	for _, t := range tokens {
+		if len([]rune(t)) < 2 {
+			continue
+		}
+		key := strings.ToLower(t)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		parts = append(parts, `"`+strings.ReplaceAll(t, `"`, "")+`"`)
+		if len(parts) >= 10 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " OR ")
 }
 
 // Write writes a memory entry
@@ -52,13 +84,17 @@ func (s *MemoryService) Search(query string, scope string, scopeID string, limit
 		limit = 10
 	}
 
-	// Build query
+	match := SanitizeFTSQuery(query)
+	if match == "" {
+		return []*MemoryEntry{}, nil
+	}
+
 	sqlQuery := `
-		SELECT path, scope, scope_id, type, snippet(memory_fts, 4, '<b>', '</b>', '...', 32) as content, rank
+		SELECT path, scope, scope_id, type, snippet(memory_fts, 4, '', '', '...', 48) as content, rank
 		FROM memory_fts
 		WHERE memory_fts MATCH ?
 	`
-	args := []interface{}{query}
+	args := []interface{}{match}
 
 	if scope != "" {
 		sqlQuery += " AND scope = ?"
@@ -74,7 +110,7 @@ func (s *MemoryService) Search(query string, scope string, scopeID string, limit
 
 	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search memories: %w", err)
+		return []*MemoryEntry{}, nil
 	}
 	defer rows.Close()
 
@@ -89,6 +125,22 @@ func (s *MemoryService) Search(query string, scope string, scopeID string, limit
 	}
 
 	return entries, nil
+}
+
+// SearchSessionRelevant searches session + global memories for a query.
+func (s *MemoryService) SearchSessionRelevant(sessionID, query string, limit int) ([]*MemoryEntry, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	sessionHits, err := s.Search(query, "sessions", sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessionHits) >= limit {
+		return sessionHits, nil
+	}
+	globalHits, _ := s.Search(query, "global", "", limit-len(sessionHits))
+	return append(sessionHits, globalHits...), nil
 }
 
 // Recent returns recent memories
@@ -125,19 +177,16 @@ func (s *MemoryService) Delete(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete memory: %w", err)
 	}
-
 	return nil
 }
 
 // Reconcile reconciles memory index
 func (s *MemoryService) Reconcile() (int, error) {
-	// Count entries
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM memory_fts").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count memories: %w", err)
 	}
-
 	return count, nil
 }
 
@@ -155,13 +204,11 @@ func (s *MemoryService) GetStats() (*MemoryStats, error) {
 		ByType:  make(map[string]int),
 	}
 
-	// Total entries
 	err := s.db.QueryRow("SELECT COUNT(*) FROM memory_fts").Scan(&stats.TotalEntries)
 	if err != nil {
 		return nil, fmt.Errorf("failed to count memories: %w", err)
 	}
 
-	// By scope
 	rows, err := s.db.Query("SELECT scope, COUNT(*) FROM memory_fts GROUP BY scope")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get scope stats: %w", err)
@@ -177,7 +224,6 @@ func (s *MemoryService) GetStats() (*MemoryStats, error) {
 		stats.ByScope[scope] = count
 	}
 
-	// By type
 	rows, err = s.db.Query("SELECT type, COUNT(*) FROM memory_fts GROUP BY type")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get type stats: %w", err)
@@ -211,6 +257,19 @@ func (s *MemoryService) WriteProjectMemory(projectID string, content string) err
 func (s *MemoryService) WriteSessionMemory(sessionID string, content string) error {
 	return s.Write(&MemoryEntry{
 		Path:    fmt.Sprintf("sessions/%s/checkpoint.md", sessionID),
+		Scope:   "sessions",
+		ScopeID: sessionID,
+		Type:    "checkpoint",
+		Content: content,
+	})
+}
+
+// UpsertSessionMemory replaces the session checkpoint memory.
+func (s *MemoryService) UpsertSessionMemory(sessionID string, content string) error {
+	path := fmt.Sprintf("sessions/%s/checkpoint.md", sessionID)
+	_ = s.Delete(path)
+	return s.Write(&MemoryEntry{
+		Path:    path,
 		Scope:   "sessions",
 		ScopeID: sessionID,
 		Type:    "checkpoint",

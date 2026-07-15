@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/alex/codegateway/internal/agent/promptctx"
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
@@ -16,38 +17,36 @@ func runCoderAgent(
 	ctx context.Context,
 	prov provider.Provider,
 	modelName string,
-	userMessage string,
+	seed []provider.Message,
 	ws *workspace.Workspace,
 	temperature float64,
 	maxTokens int,
 	maxIterations int,
+	toolResultMaxChars int,
+	toolResultKeepRecent int,
 ) (string, provider.Usage, []map[string]string, error) {
 	if maxIterations <= 0 {
 		maxIterations = 8
+	}
+	if maxTokens <= 0 {
+		maxTokens = 4096
 	}
 
 	registry := tool.NewChrootedRegistry(ws.RootPath)
 	tools := toProviderTools(registry)
 
-	system := fmt.Sprintf(
-		"You are CodeGateway Coder, an expert software engineering agent working inside a cloud workspace.\n"+
-			"Project root: %s (treat paths as relative to this root).\n"+
-			"Use tools to explore and edit files. Prefer read_file / list_directory / grep / search_files before writing.\n"+
-			"When changing code, use write_file with complete file contents for the files you modify.\n"+
-			"After edits, briefly summarize what changed and how to verify.\n"+
-			"Do not attempt to access paths outside the project.",
-		ws.Name,
-	)
-
-	messages := []provider.Message{
-		{Role: "system", Content: system},
-		{Role: "user", Content: userMessage},
+	messages := make([]provider.Message, len(seed))
+	copy(messages, seed)
+	if len(messages) == 0 {
+		return "", provider.Usage{}, nil, fmt.Errorf("empty coder seed messages")
 	}
 
 	var usage provider.Usage
 	var steps []map[string]string
 
 	for i := 0; i < maxIterations; i++ {
+		promptctx.CompactToolMessages(messages, toolResultKeepRecent, toolResultMaxChars)
+
 		temp := temperature
 		mt := maxTokens
 		resp, err := prov.ChatCompletion(ctx, &provider.ChatCompletionRequest{
@@ -100,16 +99,22 @@ func runCoderAgent(
 				}
 			}
 
+			// Cap what we keep for the next model turn immediately
+			modelContent := content
+			if toolResultMaxChars > 0 && len(modelContent) > toolResultMaxChars {
+				modelContent = modelContent[:toolResultMaxChars] + "\n…[truncated tool result]"
+			}
+
 			steps = append(steps, map[string]string{
-				"tool": tc.Function.Name,
-				"args": raw,
+				"tool":   tc.Function.Name,
+				"args":   raw,
 				"result": truncate(content, 2000),
 			})
 			log.Printf("[coder] tool=%s workspace=%s", tc.Function.Name, ws.ID)
 
 			messages = append(messages, provider.Message{
 				Role:       "tool",
-				Content:    content,
+				Content:    modelContent,
 				ToolCallID: tc.ID,
 			})
 		}
@@ -140,17 +145,33 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func coderFallbackPrompt(modelName, userMessage string) []provider.Message {
-	system := fmt.Sprintf(
-		"You are CodeGateway Coder, an expert software engineering assistant powered by %s. "+
-			"No workspace is attached. Ask the user to upload a project directory for file editing, "+
-			"or provide concrete code in your reply using fenced markdown blocks.",
+func coderSystemPrompt(modelName, workspaceName string) string {
+	return fmt.Sprintf(
+		"You are CodeGateway Coder, an expert software engineering agent powered by %s working inside a cloud workspace.\n"+
+			"Project: %s (treat paths as relative to project root).\n"+
+			"Use tools to explore and edit files. Prefer read_file / list_directory / grep / search_files before writing.\n"+
+			"When changing code, use write_file with complete file contents for the files you modify.\n"+
+			"After edits, briefly summarize what changed and how to verify.\n"+
+			"Do not attempt to access paths outside the project.\n"+
+			"Use retrieved memory and prior chat turns when relevant; prefer concise tool usage to save tokens.",
+		modelName, workspaceName,
+	)
+}
+
+func chatSystemPrompt(modelName, mode string) string {
+	if mode == "coder" {
+		return fmt.Sprintf(
+			"You are CodeGateway Coder, an expert software engineering assistant powered by %s. "+
+				"No workspace tools are attached for this turn. Prefer concrete code in fenced markdown blocks. "+
+				"Use conversation memory and prior turns when relevant.",
+			modelName,
+		)
+	}
+	return fmt.Sprintf(
+		"You are a helpful AI assistant powered by %s served by CodeGateway. "+
+			"Use conversation memory and prior turns when relevant; keep answers concise.",
 		modelName,
 	)
-	return []provider.Message{
-		{Role: "system", Content: system},
-		{Role: "user", Content: userMessage},
-	}
 }
 
 func summarizeTreeHint(entries []workspace.TreeEntry) string {
