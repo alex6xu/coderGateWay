@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { apiFetch, useAccount } from '../context/AccountContext'
 
 interface Message {
   id: string
@@ -8,6 +9,7 @@ interface Message {
 }
 
 export default function ChatPage() {
+  const { currentAccount } = useAccount()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -15,38 +17,57 @@ export default function ChatPage() {
   const [connected, setConnected] = useState(false)
   const [sessionId, setSessionId] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
+    if (!currentAccount) return
+
+    setMessages([])
+    setSessionId('')
+    setIsLoading(false)
     connectWebSocket()
+
     return () => {
-      if (ws) ws.close()
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      if (wsRef.current) {
+        wsRef.current.onclose = null
+        wsRef.current.close()
+      }
     }
-  }, [])
+  }, [currentAccount?.id])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
   const connectWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close()
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws`
-    
+    const accountParam = currentAccount?.id ? `?account_id=${currentAccount.id}` : ''
+    const wsUrl = `${protocol}//${window.location.host}/ws${accountParam}`
+
     const websocket = new WebSocket(wsUrl)
-    
+    wsRef.current = websocket
+
     websocket.onopen = () => {
       setWs(websocket)
       setConnected(true)
     }
-    
+
     websocket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-        
+
         if (data.type === 'connected') {
           setSessionId(data.session_id)
           return
         }
-        
+
         if (data.role === 'assistant') {
           setMessages(prev => [...prev, {
             id: Date.now().toString(),
@@ -60,14 +81,13 @@ export default function ChatPage() {
         console.error('Failed to parse message:', e)
       }
     }
-    
+
     websocket.onclose = () => {
       setWs(null)
       setConnected(false)
-      // Reconnect after 3 seconds
-      setTimeout(connectWebSocket, 3000)
+      reconnectTimer.current = setTimeout(connectWebSocket, 3000)
     }
-    
+
     websocket.onerror = () => {
       setConnected(false)
     }
@@ -93,30 +113,27 @@ export default function ChatPage() {
         content: input,
       }))
     } else {
-      // Fallback to HTTP API
       try {
-        const response = await fetch('/v1/agent/chat', {
+        const response = await apiFetch('/v1/agent/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             message: input,
             session_id: sessionId,
           }),
-        })
+        }, currentAccount?.id)
         const data = await response.json()
-        
+
         if (data.session_id) {
           setSessionId(data.session_id)
         }
-        
-        // Check for API key error
+
         let content = data.response || data.error || 'No response'
         if (content.includes('MiMoCode backend') || content.includes('create session failed')) {
           content = '⚠️ ' + content + '\n\n如需使用 MiMoCode 本地代理，请先启动：\n`mimo serve --hostname 127.0.0.1 --port 10001`\n默认免费通道（类型 7）无需本地服务，可直接调用 mimo-auto。'
         } else if (content.includes('bootstrap failed') || content.includes('mimo-auto token') || content.includes('Illegal access')) {
           content = '⚠️ ' + content + '\n\nMiMo Free 通道直连小米免费 API，请确认网络可访问 api.xiaomimimo.com，且 Channels 中存在类型 7 渠道。'
         }
-        
+
         setMessages(prev => [...prev, {
           id: Date.now().toString(),
           role: 'assistant',
@@ -142,7 +159,6 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <header className="h-14 flex items-center justify-between px-6 border-b border-border">
         <div>
           <h2 className="text-sm font-semibold text-foreground">Chat</h2>
@@ -158,6 +174,7 @@ export default function ChatPage() {
                 Disconnected
               </span>
             )}
+            {currentAccount && <span className="ml-2">@{currentAccount.username}</span>}
             {sessionId && <span className="ml-2">Session: {sessionId.substring(0, 8)}...</span>}
           </p>
         </div>
@@ -169,7 +186,6 @@ export default function ChatPage() {
         </button>
       </header>
 
-      {/* Messages */}
       <div className="flex-1 overflow-auto p-6 space-y-4">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
@@ -184,7 +200,7 @@ export default function ChatPage() {
                 Welcome to CodeGateway
               </h3>
               <p className="text-[13px] text-muted-foreground max-w-sm">
-                Start a conversation with your AI assistant. Make sure you have added a channel with an API key first.
+                Start a conversation with your AI assistant. Channels and sessions are stored per account.
               </p>
               <div className="mt-4 text-[12px] text-muted-foreground/60">
                 <p>1. Go to Channels page and add your API provider</p>
@@ -213,7 +229,7 @@ export default function ChatPage() {
             </div>
           ))
         )}
-        
+
         {isLoading && (
           <div className="flex justify-start animate-fade-in">
             <div className="bg-card border border-border rounded-xl px-4 py-3">
@@ -225,11 +241,10 @@ export default function ChatPage() {
             </div>
           </div>
         )}
-        
+
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
       <div className="p-4 border-t border-border">
         <div className="flex gap-2">
           <input

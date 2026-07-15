@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiFetch, useAccount } from '../context/AccountContext'
 
 interface Stats {
   totalSessions: number
@@ -9,6 +10,7 @@ interface Stats {
 }
 
 export default function DashboardPage() {
+  const { currentAccount } = useAccount()
   const [stats, setStats] = useState<Stats>({
     totalSessions: 0,
     totalMessages: 0,
@@ -18,12 +20,14 @@ export default function DashboardPage() {
   })
 
   useEffect(() => {
-    fetchStats()
-  }, [])
+    if (currentAccount) {
+      fetchStats()
+    }
+  }, [currentAccount?.id])
 
   const fetchStats = async () => {
     try {
-      const response = await fetch('/v1/admin/stats')
+      const response = await apiFetch('/v1/admin/stats', {}, currentAccount?.id)
       if (response.ok) {
         const data = await response.json()
         setStats(data)
@@ -45,7 +49,9 @@ export default function DashboardPage() {
     <div className="p-6">
       <div className="mb-6">
         <h2 className="text-base font-semibold text-foreground">Dashboard</h2>
-        <p className="text-[13px] text-muted-foreground mt-0.5">Overview of your CodeGateway instance</p>
+        <p className="text-[13px] text-muted-foreground mt-0.5">
+          Overview for {currentAccount?.username || 'current account'}
+        </p>
       </div>
 
       {/* Stats Grid */}

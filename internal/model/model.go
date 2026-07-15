@@ -31,6 +31,7 @@ type Token struct {
 
 type Channel struct {
 	ID           int64     `json:"id"`
+	UserID       *int64    `json:"user_id"`
 	Name         string    `json:"name"`
 	Type         int       `json:"type"`
 	Key          string    `json:"key"`

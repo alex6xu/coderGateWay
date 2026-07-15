@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiFetch, useAccount } from '../context/AccountContext'
 
 interface Channel {
   id: number
@@ -13,6 +14,7 @@ interface Channel {
 }
 
 export default function ChannelsPage() {
+  const { currentAccount } = useAccount()
   const [channels, setChannels] = useState<Channel[]>([])
   const [showAdd, setShowAdd] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -27,12 +29,14 @@ export default function ChannelsPage() {
   })
 
   useEffect(() => {
-    fetchChannels()
-  }, [])
+    if (currentAccount) {
+      fetchChannels()
+    }
+  }, [currentAccount?.id])
 
   const fetchChannels = async () => {
     try {
-      const response = await fetch('/v1/admin/channels')
+      const response = await apiFetch('/v1/admin/channels', {}, currentAccount?.id)
       if (response.ok) {
         const data = await response.json()
         setChannels(data.channels || [])
@@ -47,11 +51,10 @@ export default function ChannelsPage() {
       const url = editingId ? `/v1/admin/channels/${editingId}` : '/v1/admin/channels'
       const method = editingId ? 'PUT' : 'POST'
       
-      const response = await fetch(url, {
+      const response = await apiFetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
-      })
+      }, currentAccount?.id)
 
       if (response.ok) {
         setShowAdd(false)
@@ -82,7 +85,7 @@ export default function ChannelsPage() {
     if (!confirm('Are you sure you want to delete this channel?')) return
     
     try {
-      await fetch(`/v1/admin/channels/${id}`, { method: 'DELETE' })
+      await apiFetch(`/v1/admin/channels/${id}`, { method: 'DELETE' }, currentAccount?.id)
       fetchChannels()
     } catch (error) {
       console.error('Failed to delete channel:', error)
@@ -130,7 +133,9 @@ export default function ChannelsPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-base font-semibold text-foreground">Channels</h2>
-          <p className="text-[13px] text-muted-foreground mt-0.5">Manage your API provider channels</p>
+          <p className="text-[13px] text-muted-foreground mt-0.5">
+            Manage API channels for {currentAccount?.username || 'current account'}
+          </p>
         </div>
         <button 
           onClick={() => { resetForm(); setEditingId(null); setShowAdd(true); }}

@@ -1,15 +1,20 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
+import { useAccount } from '../context/AccountContext'
 
 const navigation = [
   { name: 'Chat', href: '/', icon: '💬' },
   { name: 'Dashboard', href: '/dashboard', icon: '📊' },
   { name: 'Channels', href: '/channels', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
+  { name: 'Accounts', href: '/accounts', icon: '👤' },
   { name: 'Settings', href: '/settings', icon: '⚙️' },
 ]
 
 export default function Layout() {
   const location = useLocation()
+  const { accounts, currentAccount, setCurrentAccountId, loading } = useAccount()
+
+  const initial = (currentAccount?.username || 'A').charAt(0).toUpperCase()
 
   return (
     <div className="flex h-screen bg-background">
@@ -52,15 +57,34 @@ export default function Layout() {
           })}
         </nav>
 
-        {/* User */}
-        <div className="p-3 border-t border-border">
-          <div className="flex items-center gap-2.5 px-3 py-2 rounded-md hover:bg-accent cursor-pointer transition-colors">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-              <span className="text-white text-xs font-medium">A</span>
+        {/* Account switcher */}
+        <div className="p-3 border-t border-border space-y-2">
+          <label className="px-3 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+            Active Account
+          </label>
+          <select
+            value={currentAccount?.id || ''}
+            onChange={(e) => setCurrentAccountId(Number(e.target.value))}
+            disabled={loading || accounts.length === 0}
+            className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.username}
+              </option>
+            ))}
+          </select>
+          <div className="flex items-center gap-2.5 px-3 py-2 rounded-md">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center">
+              <span className="text-white text-xs font-medium">{initial}</span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[13px] font-medium text-foreground truncate">Admin</p>
-              <p className="text-[11px] text-muted-foreground truncate">admin@codegateway.local</p>
+              <p className="text-[13px] font-medium text-foreground truncate">
+                {currentAccount?.username || 'Loading...'}
+              </p>
+              <p className="text-[11px] text-muted-foreground truncate">
+                {currentAccount?.email || currentAccount?.role || '—'}
+              </p>
             </div>
           </div>
         </div>

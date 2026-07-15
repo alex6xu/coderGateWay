@@ -21,6 +21,7 @@ var upgrader = websocket.Upgrader{
 type WSClient struct {
 	conn      *websocket.Conn
 	sessionID string
+	accountID int64
 	send      chan []byte
 }
 
@@ -87,9 +88,12 @@ func handleWebSocket(database *db.DB, cfg *config.Config, hub *WSHub) gin.Handle
 			sessionID = generateSessionID()
 		}
 
+		accountID := getAccountID(c)
+
 		client := &WSClient{
 			conn:      conn,
 			sessionID: sessionID,
+			accountID: accountID,
 			send:      make(chan []byte, 256),
 		}
 
@@ -135,8 +139,8 @@ func (c *WSClient) readPump(database *db.DB, cfg *config.Config, hub *WSHub) {
 		}
 
 		// Process message and get response
-		log.Printf("[chat/ws] recv session=%s bytes=%d", c.sessionID, len(msg.Content))
-		response := processMessage(database, cfg, c.sessionID, msg.Content)
+		log.Printf("[chat/ws] recv account=%d session=%s bytes=%d", c.accountID, c.sessionID, len(msg.Content))
+		response := processMessage(database, cfg, c.sessionID, msg.Content, c.accountID)
 
 		// Send response
 		respData, _ := json.Marshal(map[string]interface{}{

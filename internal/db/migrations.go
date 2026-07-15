@@ -6,7 +6,7 @@ import (
 )
 
 const schema = `
--- Users table
+-- Users table (accounts)
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
@@ -34,9 +34,10 @@ CREATE TABLE IF NOT EXISTS tokens (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Channels table (Provider configurations)
+-- Channels table (Provider configurations, scoped per account)
 CREATE TABLE IF NOT EXISTS channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
     name TEXT NOT NULL,
     type INTEGER NOT NULL,
     key TEXT NOT NULL,
@@ -50,7 +51,8 @@ CREATE TABLE IF NOT EXISTS channels (
     model_mapping TEXT,
     groups TEXT DEFAULT 'default',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 -- Sessions table
@@ -152,6 +154,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_tokens_user_id ON tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_tokens_key ON tokens(key);
+CREATE INDEX IF NOT EXISTS idx_channels_user_id ON channels(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_platform ON sessions(platform);
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
@@ -170,6 +173,55 @@ func Migrate(db *DB) error {
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
+
+	if err := migrateChannelsUserID(db); err != nil {
+		return err
+	}
+
 	log.Println("Database migrations completed")
+	return nil
+}
+
+// migrateChannelsUserID adds user_id to existing channels tables created before account isolation.
+func migrateChannelsUserID(db *DB) error {
+	rows, err := db.Query("PRAGMA table_info(channels)")
+	if err != nil {
+		return fmt.Errorf("failed to inspect channels table: %w", err)
+	}
+	defer rows.Close()
+
+	hasUserID := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("failed to scan pragma: %w", err)
+		}
+		if name == "user_id" {
+			hasUserID = true
+			break
+		}
+	}
+	if hasUserID {
+		return nil
+	}
+
+	log.Println("Migrating channels: adding user_id column for per-account isolation")
+	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN user_id INTEGER REFERENCES users(id)"); err != nil {
+		return fmt.Errorf("failed to add channels.user_id: %w", err)
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_channels_user_id ON channels(user_id)"); err != nil {
+		return fmt.Errorf("failed to create channels.user_id index: %w", err)
+	}
+
+	// Assign orphaned channels to the default admin account when present
+	var adminID int64
+	err = db.QueryRow("SELECT id FROM users WHERE username = 'admin' LIMIT 1").Scan(&adminID)
+	if err == nil {
+		_, _ = db.Exec("UPDATE channels SET user_id = ? WHERE user_id IS NULL", adminID)
+	}
+
 	return nil
 }

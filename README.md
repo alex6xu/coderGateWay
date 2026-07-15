@@ -119,12 +119,22 @@ curl http://localhost:8080/v1/agent/chat \
 ### 管理接口
 
 ```bash
-# 列出所有渠道
-curl http://localhost:8080/v1/admin/channels
+# 列出账号
+curl http://localhost:8080/v1/admin/accounts
+
+# 创建账号（频道/会话按账号隔离）
+curl -X POST http://localhost:8080/v1/admin/accounts \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "email": "alice@example.com"}'
+
+# 列出当前账号的渠道（通过 X-Account-ID 切换账号）
+curl http://localhost:8080/v1/admin/channels \
+  -H "X-Account-ID: 1"
 
 # 创建渠道
 curl -X POST http://localhost:8080/v1/admin/channels \
   -H "Content-Type: application/json" \
+  -H "X-Account-ID: 1" \
   -d '{
     "name": "openai",
     "type": 1,
@@ -136,6 +146,7 @@ curl -X POST http://localhost:8080/v1/admin/channels \
 # 创建 Agnes 渠道（type=9，OpenAI 兼容）
 curl -X POST http://localhost:8080/v1/admin/channels \
   -H "Content-Type: application/json" \
+  -H "X-Account-ID: 1" \
   -d '{
     "name": "Agnes",
     "type": 9,
@@ -144,6 +155,8 @@ curl -X POST http://localhost:8080/v1/admin/channels \
     "models": "[\"agnes-2.0-flash\",\"agnes-1.5-flash\"]"
   }'
 ```
+
+每个账号拥有独立的 **channels** 与 **sessions** 数据；请求通过 `X-Account-ID` 头（或 `account_id` 查询参数）选择当前账号，为后续用户数据采集打基础。
 
 ## 项目结构
 
@@ -180,6 +193,7 @@ codegateway/
 - [x] 配置系统
 - [x] 基础 HTTP 服务器
 - [x] 用户认证框架
+- [x] 多账号隔离（channels / sessions 按账号存储）
 
 ### Phase 2: API 网关 (进行中)
 - [x] Channel 模型
