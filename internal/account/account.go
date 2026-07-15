@@ -28,29 +28,13 @@ func NewManager(db *sql.DB) *Manager {
 	return &Manager{db: db}
 }
 
-// EnsureDefault creates the default admin account if none exist.
-func (m *Manager) EnsureDefault() (*model.User, error) {
-	var count int
-	if err := m.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
-		return nil, fmt.Errorf("failed to count users: %w", err)
-	}
-	if count > 0 {
-		return m.GetByUsername(DefaultUsername)
-	}
-
-	return m.Create(&CreateRequest{
-		Username: DefaultUsername,
-		Email:    "admin@codegateway.local",
-		Role:     "admin",
-	})
-}
-
 // CreateRequest holds fields for creating an account.
 type CreateRequest struct {
 	Username string
 	Email    string
 	Role     string
 	Quota    int64
+	Password string
 }
 
 // Create inserts a new account.
@@ -65,11 +49,20 @@ func (m *Manager) Create(req *CreateRequest) (*model.User, error) {
 		role = "user"
 	}
 
+	var passwordHash interface{}
+	if strings.TrimSpace(req.Password) != "" {
+		hash, err := HashPassword(req.Password)
+		if err != nil {
+			return nil, err
+		}
+		passwordHash = hash
+	}
+
 	now := time.Now()
 	result, err := m.db.Exec(`
-		INSERT INTO users (username, email, role, quota, used_quota, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, ?, ?)
-	`, username, nullIfEmpty(req.Email), role, req.Quota, now, now)
+		INSERT INTO users (username, email, password_hash, role, quota, used_quota, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+	`, username, nullIfEmpty(req.Email), passwordHash, role, req.Quota, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account: %w", err)
 	}
@@ -234,6 +227,10 @@ func (m *Manager) Delete(id int64) error {
 
 	if _, err := tx.Exec("DELETE FROM channels WHERE user_id = ?", id); err != nil {
 		return fmt.Errorf("failed to delete channels: %w", err)
+	}
+
+	if _, err := tx.Exec("DELETE FROM auth_sessions WHERE user_id = ?", id); err != nil {
+		return fmt.Errorf("failed to delete auth sessions: %w", err)
 	}
 
 	if _, err := tx.Exec("DELETE FROM tokens WHERE user_id = ?", id); err != nil {

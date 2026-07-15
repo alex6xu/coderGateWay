@@ -140,25 +140,53 @@ curl http://localhost:8080/v1/agent/chat \
   }'
 ```
 
+### 账号认证
+
+```bash
+# 注册
+curl -X POST http://localhost:8080/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","email":"alice@example.com","password":"secret1"}'
+
+# 登录（默认管理员 admin / admin123，可用 CODEGATEWAY_ADMIN_PASSWORD 覆盖）
+curl -X POST http://localhost:8080/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}'
+
+# 当前用户
+curl http://localhost:8080/v1/auth/me \
+  -H "Authorization: Bearer <token>"
+
+# 修改密码
+curl -X POST http://localhost:8080/v1/auth/change-password \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"current_password":"admin123","new_password":"newpass1"}'
+```
+
+受保护接口需携带 `Authorization: Bearer <token>`。管理员可用 `X-Account-ID` 切换代管账号。
+
 ### 管理接口
 
 ```bash
-# 列出账号
-curl http://localhost:8080/v1/admin/accounts
+# 列出账号（需 admin）
+curl http://localhost:8080/v1/admin/accounts \
+  -H "Authorization: Bearer <token>"
 
-# 创建账号（频道/会话按账号隔离）
+# 管理员创建账号
 curl -X POST http://localhost:8080/v1/admin/accounts \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "email": "alice@example.com"}'
+  -d '{"username":"alice","email":"alice@example.com","password":"secret1"}'
 
-# 列出当前账号的渠道（通过 X-Account-ID 切换账号）
+# 列出当前账号的渠道
 curl http://localhost:8080/v1/admin/channels \
-  -H "X-Account-ID: 1"
+  -H "Authorization: Bearer <token>"
 
 # 创建渠道
 curl -X POST http://localhost:8080/v1/admin/channels \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -H "X-Account-ID: 1" \
   -d '{
     "name": "openai",
     "type": 1,
@@ -169,8 +197,8 @@ curl -X POST http://localhost:8080/v1/admin/channels \
 
 # 创建 Agnes 渠道（type=9，OpenAI 兼容）
 curl -X POST http://localhost:8080/v1/admin/channels \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -H "X-Account-ID: 1" \
   -d '{
     "name": "Agnes",
     "type": 9,
@@ -181,6 +209,7 @@ curl -X POST http://localhost:8080/v1/admin/channels \
 
 # 创建 GLM / 智谱渠道（type=10，OpenAI 兼容）
 curl -X POST http://localhost:8080/v1/admin/channels \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "GLM",
@@ -191,7 +220,7 @@ curl -X POST http://localhost:8080/v1/admin/channels \
   }'
 ```
 
-每个账号拥有独立的 **channels** 与 **sessions** 数据；请求通过 `X-Account-ID` 头（或 `account_id` 查询参数）选择当前账号，为后续用户数据采集打基础。
+每个账号拥有独立的 **channels** 与 **sessions** 数据；登录后按会话用户隔离，管理员可通过 `X-Account-ID` 代管其他账号。
 
 ## 项目结构
 

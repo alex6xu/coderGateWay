@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { apiFetch, useAccount } from '../context/AccountContext'
+import { getAuthToken } from '../context/AuthContext'
 
 interface Message {
   id: string
@@ -48,8 +49,16 @@ export default function ChatPage() {
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const accountParam = currentAccount?.id ? `?account_id=${currentAccount.id}` : ''
-    const wsUrl = `${protocol}//${window.location.host}/ws${accountParam}`
+    const params = new URLSearchParams()
+    if (currentAccount?.id) {
+      params.set('account_id', String(currentAccount.id))
+    }
+    const token = getAuthToken()
+    if (token) {
+      params.set('token', token)
+    }
+    const qs = params.toString()
+    const wsUrl = `${protocol}//${window.location.host}/ws${qs ? `?${qs}` : ''}`
 
     const websocket = new WebSocket(wsUrl)
     wsRef.current = websocket

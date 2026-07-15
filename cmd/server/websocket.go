@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
 	"github.com/gin-gonic/gin"
@@ -77,6 +78,11 @@ func (h *WSHub) run() {
 
 func handleWebSocket(database *db.DB, cfg *config.Config, hub *WSHub) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := c.Get(account.AuthUserContextKey); !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			return
+		}
+
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			log.Printf("Failed to upgrade connection: %v", err)

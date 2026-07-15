@@ -27,6 +27,7 @@ func handleCreateAccount(mgr *account.Manager) gin.HandlerFunc {
 			Email    string `json:"email"`
 			Role     string `json:"role"`
 			Quota    int64  `json:"quota"`
+			Password string `json:"password" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -38,9 +39,14 @@ func handleCreateAccount(mgr *account.Manager) gin.HandlerFunc {
 			Email:    req.Email,
 			Role:     req.Role,
 			Quota:    req.Quota,
+			Password: req.Password,
 		})
 		if err != nil {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			status := http.StatusConflict
+			if strings.Contains(err.Error(), "password") {
+				status = http.StatusBadRequest
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
 			return
 		}
 

@@ -6,26 +6,33 @@ export default function AccountsPage() {
   const [showAdd, setShowAdd] = useState(false)
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   const handleCreate = async () => {
-    if (!username.trim()) return
+    if (!username.trim() || !password) return
+    if (password.length < 6) {
+      setError('密码至少 6 位')
+      return
+    }
     setSaving(true)
     setError('')
     const account = await createAccount({
       username: username.trim(),
       email: email.trim() || undefined,
       role: 'user',
+      password,
     })
     setSaving(false)
     if (!account) {
-      setError('创建失败，用户名可能已存在')
+      setError('创建失败，用户名可能已存在或密码无效')
       return
     }
     setShowAdd(false)
     setUsername('')
     setEmail('')
+    setPassword('')
     setCurrentAccountId(account.id)
   }
 
@@ -91,6 +98,16 @@ export default function AccountsPage() {
                   className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </div>
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1.5">Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="至少 6 位"
+                  className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
               {error && <p className="text-[12px] text-destructive">{error}</p>}
             </div>
             <div className="flex justify-end gap-2 mt-6">
@@ -102,7 +119,7 @@ export default function AccountsPage() {
               </button>
               <button
                 onClick={handleCreate}
-                disabled={!username.trim() || saving}
+                disabled={!username.trim() || !password || saving}
                 className="h-9 px-4 bg-primary text-primary-foreground rounded-lg text-[13px] font-medium disabled:opacity-50"
               >
                 {saving ? 'Creating...' : 'Create'}

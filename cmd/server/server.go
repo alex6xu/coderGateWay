@@ -42,6 +42,7 @@ func Run() error {
 		log.Printf("Warning: failed to assign orphaned data: %v", err)
 	}
 	log.Printf("Default account ready: %s (id=%d)", defaultAccount.Username, defaultAccount.ID)
+	log.Printf("Auth: login with username=%s (default password from CODEGATEWAY_ADMIN_PASSWORD or %q)", account.DefaultUsername, account.DefaultAdminPassword)
 
 	// Initialize default channels for the default account
 	initDefaultChannels(database, cfg, defaultAccount.ID)
@@ -80,7 +81,7 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Account-ID")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Account-ID, X-Session-Token")
 		c.Header("Access-Control-Allow-Credentials", "true")
 		// CSP header for development
 		c.Header("Content-Security-Policy", "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
@@ -106,52 +107,66 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 	// API v1
 	v1 := r.Group("/v1")
 	{
-		v1.POST("/chat/completions", handleChatCompletions(database, cfg))
-		// OpenAI-compatible models API
-		v1.GET("/models", handleListModels(database))
-		v1.GET("/models/*model", handleRetrieveModel(database))
-
-		gateway := v1.Group("/gateway")
+		// Public auth endpoints
+		auth := v1.Group("/auth")
 		{
-			gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
-			gateway.GET("/models", handleListModels(database))
-			gateway.GET("/models/*model", handleRetrieveModel(database))
-			gateway.POST("/messages", handleClaudeMessages(database, cfg))
-			gateway.POST("/v1beta/*path", handleGemini(database, cfg))
+			auth.POST("/register", handleRegister(accountMgr))
+			auth.POST("/login", handleLogin(accountMgr))
+			auth.POST("/logout", handleLogout(accountMgr))
+			auth.GET("/me", requireAuth(accountMgr), handleMe(accountMgr))
+			auth.POST("/change-password", requireAuth(accountMgr), handleChangePassword(accountMgr))
 		}
 
-		// Agent endpoints
-		agent := v1.Group("/agent")
+		protected := v1.Group("")
+		protected.Use(requireAuth(accountMgr))
 		{
-			agent.POST("/chat", handleAgentChat(database, cfg))
-			agent.GET("/sessions", handleListSessions(database))
-			agent.GET("/sessions/:id", handleGetSession(database))
-		}
+			protected.POST("/chat/completions", handleChatCompletions(database, cfg))
+			protected.GET("/models", handleListModels(database))
+			protected.GET("/models/*model", handleRetrieveModel(database))
 
-		// Admin endpoints
-		admin := v1.Group("/admin")
-		{
-			admin.GET("/stats", handleGetStats(database))
+			gateway := protected.Group("/gateway")
+			{
+				gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
+				gateway.GET("/models", handleListModels(database))
+				gateway.GET("/models/*model", handleRetrieveModel(database))
+				gateway.POST("/messages", handleClaudeMessages(database, cfg))
+				gateway.POST("/v1beta/*path", handleGemini(database, cfg))
+			}
 
-			admin.GET("/channels", handleListChannels(database))
-			admin.POST("/channels", handleCreateChannel(database))
-			admin.PUT("/channels/:id", handleUpdateChannel(database))
-			admin.DELETE("/channels/:id", handleDeleteChannel(database))
+			agent := protected.Group("/agent")
+			{
+				agent.POST("/chat", handleAgentChat(database, cfg))
+				agent.GET("/sessions", handleListSessions(database))
+				agent.GET("/sessions/:id", handleGetSession(database))
+			}
 
-			// Accounts (per-user channel/session isolation)
-			admin.GET("/accounts", handleListAccounts(accountMgr))
-			admin.POST("/accounts", handleCreateAccount(accountMgr))
-			admin.GET("/accounts/current", handleGetCurrentAccount(accountMgr))
-			admin.GET("/accounts/:id", handleGetAccount(accountMgr))
-			admin.PUT("/accounts/:id", handleUpdateAccount(accountMgr))
-			admin.DELETE("/accounts/:id", handleDeleteAccount(accountMgr))
+			admin := protected.Group("/admin")
+			{
+				admin.GET("/stats", handleGetStats(database))
 
-			// Legacy user aliases
-			admin.GET("/users", handleListUsers(accountMgr))
-			admin.POST("/users", handleCreateUser(accountMgr))
+				admin.GET("/channels", handleListChannels(database))
+				admin.POST("/channels", handleCreateChannel(database))
+				admin.PUT("/channels/:id", handleUpdateChannel(database))
+				admin.DELETE("/channels/:id", handleDeleteChannel(database))
 
-			admin.GET("/tokens", handleListTokens(database))
-			admin.POST("/tokens", handleCreateToken(database))
+				admin.GET("/accounts/current", handleGetCurrentAccount(accountMgr))
+
+				// Account management is admin-only
+				accounts := admin.Group("")
+				accounts.Use(requireAdmin())
+				{
+					accounts.GET("/accounts", handleListAccounts(accountMgr))
+					accounts.POST("/accounts", handleCreateAccount(accountMgr))
+					accounts.GET("/accounts/:id", handleGetAccount(accountMgr))
+					accounts.PUT("/accounts/:id", handleUpdateAccount(accountMgr))
+					accounts.DELETE("/accounts/:id", handleDeleteAccount(accountMgr))
+					accounts.GET("/users", handleListUsers(accountMgr))
+					accounts.POST("/users", handleCreateUser(accountMgr))
+				}
+
+				admin.GET("/tokens", handleListTokens(database))
+				admin.POST("/tokens", handleCreateToken(database))
+			}
 		}
 	}
 }

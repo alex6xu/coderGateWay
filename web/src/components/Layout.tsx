@@ -1,27 +1,34 @@
-import { Outlet, Link, useLocation } from 'react-router-dom'
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAccount } from '../context/AccountContext'
+import { useAuth } from '../context/AuthContext'
 
-const navigation = [
+const baseNavigation = [
   { name: 'Chat', href: '/', icon: '💬' },
   { name: 'Code', href: '/code', icon: '🛠️' },
   { name: 'Dashboard', href: '/dashboard', icon: '📊' },
   { name: 'Channels', href: '/channels', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
-  { name: 'Accounts', href: '/accounts', icon: '👤' },
+  { name: 'Accounts', href: '/accounts', icon: '👤', adminOnly: true },
   { name: 'Settings', href: '/settings', icon: '⚙️' },
 ]
 
 export default function Layout() {
   const location = useLocation()
+  const navigate = useNavigate()
   const { accounts, currentAccount, setCurrentAccountId, loading } = useAccount()
+  const { user, isAdmin, logout } = useAuth()
 
-  const initial = (currentAccount?.username || 'A').charAt(0).toUpperCase()
+  const navigation = baseNavigation.filter((item) => !item.adminOnly || isAdmin)
+  const initial = (user?.username || currentAccount?.username || 'A').charAt(0).toUpperCase()
+
+  const handleLogout = async () => {
+    await logout()
+    navigate('/login', { replace: true })
+  }
 
   return (
     <div className="flex h-screen bg-background">
-      {/* Sidebar */}
       <aside className="w-60 border-r border-border flex flex-col bg-card">
-        {/* Logo */}
         <div className="h-14 flex items-center px-5 border-b border-border">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
@@ -37,15 +44,14 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* Navigation */}
         <nav className="flex-1 px-3 py-3 space-y-0.5">
           {navigation.map((item) => {
             const isActive =
               item.href === '/'
                 ? location.pathname === '/'
                 : location.pathname === item.href || location.pathname.startsWith(item.href + '/')
-            // Also highlight Code for legacy /coder path
-            const codeActive = item.href === '/code' && (location.pathname === '/coder' || location.pathname.startsWith('/coder/'))
+            const codeActive =
+              item.href === '/code' && (location.pathname === '/coder' || location.pathname.startsWith('/coder/'))
             const active = isActive || codeActive
             return (
               <Link
@@ -64,40 +70,50 @@ export default function Layout() {
           })}
         </nav>
 
-        {/* Account switcher */}
         <div className="p-3 border-t border-border space-y-2">
-          <label className="px-3 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
-            Active Account
-          </label>
-          <select
-            value={currentAccount?.id || ''}
-            onChange={(e) => setCurrentAccountId(Number(e.target.value))}
-            disabled={loading || accounts.length === 0}
-            className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.username}
-              </option>
-            ))}
-          </select>
+          {isAdmin && (
+            <>
+              <label className="px-3 text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+                Impersonate Account
+              </label>
+              <select
+                value={currentAccount?.id || ''}
+                onChange={(e) => setCurrentAccountId(Number(e.target.value))}
+                disabled={loading || accounts.length === 0}
+                className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.username}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+
           <div className="flex items-center gap-2.5 px-3 py-2 rounded-md">
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center">
               <span className="text-white text-xs font-medium">{initial}</span>
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-medium text-foreground truncate">
-                {currentAccount?.username || 'Loading...'}
+                {user?.username || 'Loading...'}
               </p>
               <p className="text-[11px] text-muted-foreground truncate">
-                {currentAccount?.email || currentAccount?.role || '—'}
+                {user?.role || user?.email || '—'}
               </p>
             </div>
           </div>
+
+          <button
+            onClick={handleLogout}
+            className="w-full h-9 px-3 text-[13px] text-muted-foreground border border-border rounded-lg hover:bg-accent hover:text-foreground transition-colors"
+          >
+            退出登录
+          </button>
         </div>
       </aside>
 
-      {/* Main content */}
       <main className="flex-1 overflow-auto">
         <Outlet />
       </main>

@@ -1,4 +1,5 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
+import { AuthProvider, useAuth } from './context/AuthContext'
 import { AccountProvider } from './context/AccountContext'
 import Layout from './components/Layout'
 import ChatPage from './pages/ChatPage'
@@ -8,25 +9,57 @@ import ChannelsPage from './pages/ChannelsPage'
 import SessionsPage from './pages/SessionsPage'
 import SettingsPage from './pages/SettingsPage'
 import AccountsPage from './pages/AccountsPage'
+import LoginPage from './pages/LoginPage'
+import RegisterPage from './pages/RegisterPage'
+
+function ProtectedApp() {
+  const { user, loading, isAdmin } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background text-[13px] text-muted-foreground">
+        加载中…
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />
+  }
+
+  return (
+    <AccountProvider>
+      <Routes>
+        <Route path="/" element={<Layout />}>
+          <Route index element={<ChatPage />} />
+          <Route path="code" element={<CoderPage />} />
+          <Route path="coder" element={<CoderPage />} />
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="channels" element={<ChannelsPage />} />
+          <Route path="sessions" element={<SessionsPage />} />
+          <Route
+            path="accounts"
+            element={isAdmin ? <AccountsPage /> : <Navigate to="/" replace />}
+          />
+          <Route path="settings" element={<SettingsPage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AccountProvider>
+  )
+}
 
 function App() {
   return (
-    <AccountProvider>
+    <AuthProvider>
       <Router>
         <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<ChatPage />} />
-            <Route path="code" element={<CoderPage />} />
-            <Route path="coder" element={<CoderPage />} />
-            <Route path="dashboard" element={<DashboardPage />} />
-            <Route path="channels" element={<ChannelsPage />} />
-            <Route path="sessions" element={<SessionsPage />} />
-            <Route path="accounts" element={<AccountsPage />} />
-            <Route path="settings" element={<SettingsPage />} />
-          </Route>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/*" element={<ProtectedApp />} />
         </Routes>
       </Router>
-    </AccountProvider>
+    </AuthProvider>
   )
 }
 
