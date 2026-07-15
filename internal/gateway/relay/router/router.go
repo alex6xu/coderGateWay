@@ -223,9 +223,9 @@ func (r *SmartRouter) selectAuto(modelName string, candidates []*ChannelState) *
 			}
 		}
 	case PromptTypeChat:
-		// For chat tasks, prefer OpenAI or Agnes
+		// For chat tasks, prefer OpenAI, Agnes, or GLM
 		for _, cs := range candidates {
-			if cs.Channel.Type == model.ChannelTypeOpenAI || cs.Channel.Type == model.ChannelTypeAgnes {
+			if cs.Channel.Type == model.ChannelTypeOpenAI || cs.Channel.Type == model.ChannelTypeAgnes || cs.Channel.Type == model.ChannelTypeGLM {
 				return cs.Channel
 			}
 		}

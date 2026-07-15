@@ -98,3 +98,12 @@ billing:
     agnes-2.0-flash:
       input: 0.2
       output: 0.8
+    glm-4-flash:
+      input: 0.1
+      output: 0.1
+    glm-4.7:
+      input: 0.5
+      output: 2.0
+    glm-5.2:
+      input: 1.0
+      output: 4.0
