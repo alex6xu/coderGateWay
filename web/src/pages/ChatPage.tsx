@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch, useAccount } from '../context/AccountContext'
 import { getAuthToken } from '../context/AuthContext'
+import VoiceInputButton from '../components/VoiceInputButton'
+import { useVoiceInput } from '../hooks/useVoiceInput'
 
 interface Message {
   id: string
@@ -102,8 +104,28 @@ export default function ChatPage() {
     }
   }
 
+  const appendVoiceText = useCallback((text: string) => {
+    setInput((prev) => {
+      const base = prev.trimEnd()
+      if (!base) return text
+      const needsSpace = !/[\s\n]$/.test(base) && !/^[，。！？、,.!?]/.test(text)
+      return base + (needsSpace ? ' ' : '') + text
+    })
+  }, [])
+
+  const voice = useVoiceInput({
+    lang: 'zh-CN',
+    accountId: currentAccount?.id,
+    onTranscript: (text, meta) => {
+      if (meta.final) appendVoiceText(text)
+    },
+  })
+
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return
+    if (voice.listening) {
+      await voice.stop()
+    }
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -255,15 +277,29 @@ export default function ChatPage() {
       </div>
 
       <div className="p-4 border-t border-border">
+        {(voice.interim || voice.error) && (
+          <div className="mb-2 text-[11px]">
+            {voice.listening && voice.interim && (
+              <span className="text-muted-foreground">识别中：{voice.interim}</span>
+            )}
+            {voice.error && <span className="text-red-500">{voice.error}</span>}
+          </div>
+        )}
         <div className="flex gap-2">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-            placeholder={connected ? "Type your message..." : "Connecting..."}
+            placeholder={connected ? '输入消息，或点麦克风口述…' : 'Connecting...'}
             className="flex-1 h-10 px-4 bg-card border border-border rounded-lg text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition-colors"
             disabled={isLoading || !connected}
+          />
+          <VoiceInputButton
+            listening={voice.listening}
+            supported={voice.supported}
+            disabled={isLoading || !connected}
+            onClick={() => void voice.toggle()}
           />
           <button
             onClick={sendMessage}

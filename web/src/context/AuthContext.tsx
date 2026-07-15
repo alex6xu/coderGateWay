@@ -32,9 +32,10 @@ export function getAuthToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
 
-export function authHeaders(accountId?: number | null): HeadersInit {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+export function authHeaders(accountId?: number | null, opts?: { json?: boolean }): HeadersInit {
+  const headers: Record<string, string> = {}
+  if (opts?.json !== false) {
+    headers['Content-Type'] = 'application/json'
   }
   const token = getAuthToken()
   if (token) {
@@ -52,9 +53,14 @@ export function authHeaders(accountId?: number | null): HeadersInit {
 }
 
 export async function apiFetch(input: string, init: RequestInit = {}, accountId?: number | null): Promise<Response> {
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData
   const headers = {
-    ...authHeaders(accountId),
+    ...authHeaders(accountId, { json: !isFormData }),
     ...(init.headers || {}),
+  }
+  // Let the browser set multipart boundary for FormData
+  if (isFormData && headers && typeof headers === 'object') {
+    delete (headers as Record<string, string>)['Content-Type']
   }
   return fetch(input, { ...init, headers })
 }

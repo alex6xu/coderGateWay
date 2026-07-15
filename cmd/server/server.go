@@ -174,6 +174,9 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				ghAPI.POST("/import", handleGitHubImportRepo(ghSvc, workspaceMgr))
 			}
 
+			protected.GET("/asr/status", handleASRStatus(cfg))
+			protected.POST("/asr", handleASR(cfg))
+
 			admin := protected.Group("/admin")
 			{
 				admin.GET("/stats", handleGetStats(database))

@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef, ChangeEvent } from 'react'
+import { useState, useEffect, useRef, ChangeEvent, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { apiFetch, useAccount } from '../context/AccountContext'
+import VoiceInputButton from '../components/VoiceInputButton'
+import { useVoiceInput } from '../hooks/useVoiceInput'
 
 interface Message {
   id: string
@@ -362,8 +364,28 @@ export default function CoderPage() {
     })
   }
 
+  const appendVoiceText = useCallback((text: string) => {
+    setInput((prev) => {
+      const base = prev.trimEnd()
+      if (!base) return text
+      const needsSpace = !/[\s\n]$/.test(base) && !/^[，。！？、,.!?]/.test(text)
+      return base + (needsSpace ? ' ' : '') + text
+    })
+  }, [])
+
+  const voice = useVoiceInput({
+    lang: 'zh-CN',
+    accountId: currentAccount?.id,
+    onTranscript: (text, meta) => {
+      if (meta.final) appendVoiceText(text)
+    },
+  })
+
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return
+    if (voice.listening) {
+      await voice.stop()
+    }
 
     const content = input
     const userMessage: Message = {
@@ -841,6 +863,14 @@ export default function CoderPage() {
       )}
 
       <div className="p-4 border-t border-border">
+        {(voice.interim || voice.error) && (
+          <div className="mb-2 text-[11px]">
+            {voice.listening && voice.interim && (
+              <span className="text-muted-foreground">识别中：{voice.interim}</span>
+            )}
+            {voice.error && <span className="text-red-500">{voice.error}</span>}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <textarea
             ref={textareaRef}
@@ -849,12 +879,23 @@ export default function CoderPage() {
             onKeyDown={onKeyDown}
             placeholder={
               workspaceId
-                ? '描述要改的功能，例如：给登录接口加上失败次数限制…（Enter 发送）'
-                : '先上传项目目录，或直接粘贴代码提问…'
+                ? '描述要改的功能，或点麦克风口述…（Enter 发送）'
+                : '先上传/导入项目，或直接粘贴代码提问…'
             }
             rows={3}
             className="flex-1 px-4 py-2.5 bg-card border border-border rounded-lg text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition-colors resize-none font-mono"
             disabled={isLoading}
+          />
+          <VoiceInputButton
+            listening={voice.listening}
+            supported={voice.supported}
+            disabled={isLoading}
+            title={
+              voice.engine === 'server'
+                ? '语音输入（服务端 ASR）'
+                : '语音输入（浏览器 Web Speech）'
+            }
+            onClick={() => void voice.toggle()}
           />
           <button
             onClick={sendMessage}

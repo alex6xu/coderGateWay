@@ -18,6 +18,7 @@ type Config struct {
 	Platform PlatformConfig `yaml:"platforms"`
 	Billing  BillingConfig  `yaml:"billing"`
 	GitHub   GitHubConfig   `yaml:"github"`
+	ASR      ASRConfig      `yaml:"asr"`
 }
 
 // GitHubConfig enables OAuth and repository import into workspaces.
@@ -28,6 +29,17 @@ type GitHubConfig struct {
 	RedirectURL  string `yaml:"redirect_url"` // e.g. http://localhost:8080/v1/github/callback
 	FrontendURL  string `yaml:"frontend_url"` // e.g. http://localhost:5173/code
 	Scopes       string `yaml:"scopes"`       // default: read:user repo
+}
+
+// ASRConfig proxies audio to an OpenAI-compatible Whisper transcription API
+// (local faster-whisper, speaches, FunASR gateway, etc.). Browser Web Speech is preferred by default.
+type ASRConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Provider string `yaml:"provider"` // openai_compatible
+	BaseURL  string `yaml:"base_url"` // e.g. http://127.0.0.1:9000/v1
+	APIKey   string `yaml:"api_key"`
+	Model    string `yaml:"model"`
+	Language string `yaml:"language"` // zh / en / ...
 }
 
 type ServerConfig struct {
@@ -216,6 +228,28 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.GitHub.RedirectURL == "" && cfg.Server.Port > 0 {
 		cfg.GitHub.RedirectURL = fmt.Sprintf("http://localhost:%d/v1/github/callback", cfg.Server.Port)
 	}
+	if v := os.Getenv("ASR_BASE_URL"); v != "" {
+		cfg.ASR.BaseURL = v
+		cfg.ASR.Enabled = true
+	}
+	if v := os.Getenv("ASR_API_KEY"); v != "" {
+		cfg.ASR.APIKey = v
+	}
+	if v := os.Getenv("ASR_MODEL"); v != "" {
+		cfg.ASR.Model = v
+	}
+	if v := os.Getenv("ASR_ENABLED"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.ASR.Enabled = true
+	}
+	if cfg.ASR.Provider == "" {
+		cfg.ASR.Provider = "openai_compatible"
+	}
+	if cfg.ASR.Model == "" {
+		cfg.ASR.Model = "whisper-1"
+	}
+	if cfg.ASR.Language == "" {
+		cfg.ASR.Language = "zh"
+	}
 }
 
 func defaultConfig() *Config {
@@ -302,6 +336,13 @@ func defaultConfig() *Config {
 			Scopes:      "read:user repo",
 			FrontendURL: "/code",
 			RedirectURL: "http://localhost:8080/v1/github/callback",
+		},
+		ASR: ASRConfig{
+			Enabled:  false,
+			Provider: "openai_compatible",
+			BaseURL:  "",
+			Model:    "whisper-1",
+			Language: "zh",
 		},
 	}
 }

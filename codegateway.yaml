@@ -131,3 +131,19 @@ github:
   redirect_url: "http://localhost:8080/v1/github/callback"
   frontend_url: "/code"
   scopes: "read:user repo"
+
+# Optional server ASR (OpenAI-compatible Whisper). Browser Web Speech is preferred by default.
+# Example local stack: speaches / faster-whisper OpenAI-compatible server
+# asr:
+#   enabled: true
+#   base_url: "http://127.0.0.1:9000/v1"
+#   api_key: ""
+#   model: "whisper-1"
+#   language: "zh"
+asr:
+  enabled: false
+  provider: openai_compatible
+  base_url: ""
+  api_key: ""
+  model: "whisper-1"
+  language: "zh"

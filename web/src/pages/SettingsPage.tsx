@@ -62,6 +62,16 @@ export default function SettingsPage() {
         </div>
 
         <div className="bg-card border border-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-foreground mb-2">语音输入</h3>
+          <p className="text-[13px] text-muted-foreground leading-relaxed">
+            Chat / Code 页支持麦克风口述。默认使用浏览器 Web Speech（推荐 Chrome）。若需完全开源离线识别，可配置
+            <code className="mx-1 text-[12px]">asr.base_url</code>
+            指向 Whisper 兼容服务（如 speaches / faster-whisper），或设置环境变量
+            <code className="mx-1 text-[12px]">ASR_BASE_URL</code>。
+          </p>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl p-5">
           <h3 className="text-sm font-semibold text-foreground mb-2">GitHub 仓库接入</h3>
           <p className="text-[13px] text-muted-foreground leading-relaxed">
             在 Code 页可授权 GitHub 并导入仓库为云端工作区。服务端需配置 OAuth App：
