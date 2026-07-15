@@ -9,6 +9,7 @@ import (
 
 	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/agent/memory"
+	"github.com/alex/codegateway/internal/agent/tags"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/githubvcs"
@@ -49,6 +50,7 @@ func Run() error {
 
 	workspaceMgr := workspace.NewManager(database.DB, "./data/workspaces")
 	memSvc := memory.NewMemoryService(database.DB)
+	tagSvc := tags.NewService(database.DB)
 	ghSvc := githubvcs.NewService(database.DB, cfg.GitHub)
 	if ghSvc.Configured() {
 		log.Printf("GitHub OAuth enabled (client_id=%s…)", trimID(cfg.GitHub.ClientID))
@@ -67,7 +69,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc)
+	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc, tagSvc)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -88,7 +90,7 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service, tagSvc *tags.Service) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -114,7 +116,7 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 	})
 
 	// WebSocket endpoint
-	r.GET("/ws", handleWebSocket(database, cfg, hub))
+	r.GET("/ws", handleWebSocket(database, cfg, hub, tagSvc))
 
 	// API v1
 	v1 := r.Group("/v1")
@@ -150,9 +152,13 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 
 			agent := protected.Group("/agent")
 			{
-				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc))
+				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc))
 				agent.GET("/sessions", handleListSessions(database))
 				agent.GET("/sessions/:id", handleGetSession(database))
+				agent.GET("/tags", handleListTags(tagSvc))
+				agent.GET("/tags/overview", handleTagOverview(tagSvc))
+				agent.GET("/tags/:slug", handleGetTagMessages(tagSvc))
+				agent.POST("/tags/retag", handleRetagMessages(tagSvc))
 			}
 
 			wsAPI := protected.Group("/workspaces")

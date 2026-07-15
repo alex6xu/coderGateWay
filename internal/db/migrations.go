@@ -214,6 +214,34 @@ CREATE TABLE IF NOT EXISTS github_oauth_states (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_github_oauth_states_expires ON github_oauth_states(expires_at);
+
+-- Auto-classified tags for user questions
+CREATE TABLE IF NOT EXISTS question_tags (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    kind TEXT DEFAULT 'category',
+    use_count INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, slug),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_question_tags_user ON question_tags(user_id);
+CREATE INDEX IF NOT EXISTS idx_question_tags_user_count ON question_tags(user_id, use_count DESC);
+
+CREATE TABLE IF NOT EXISTS message_tags (
+    message_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    confidence REAL DEFAULT 0,
+    source TEXT DEFAULT 'auto',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, tag_id),
+    FOREIGN KEY (message_id) REFERENCES messages(id),
+    FOREIGN KEY (tag_id) REFERENCES question_tags(id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_tags_tag ON message_tags(tag_id);
 `
 
 // Indexes that require user_id columns. Created after upgrade migrations so existing

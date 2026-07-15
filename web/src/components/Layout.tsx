@@ -8,6 +8,7 @@ const baseNavigation = [
   { name: 'Dashboard', href: '/dashboard', icon: '📊' },
   { name: 'Channels', href: '/channels', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
+  { name: 'Tags', href: '/tags', icon: '🏷️' },
   { name: 'Accounts', href: '/accounts', icon: '👤', adminOnly: true },
   { name: 'Settings', href: '/settings', icon: '⚙️' },
 ]

@@ -17,6 +17,7 @@ import (
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/agent/memory"
 	"github.com/alex/codegateway/internal/agent/promptctx"
+	"github.com/alex/codegateway/internal/agent/tags"
 	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
@@ -318,7 +319,7 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 
 // ========== Agent Chat Handler ==========
 
-func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager, mem *memory.MemoryService) gin.HandlerFunc {
+func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager, mem *memory.MemoryService, tagSvc *tags.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -365,6 +366,17 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 			INSERT INTO messages (id, session_id, role, content, created_at)
 			VALUES (?, ?, 'user', ?, ?)
 		`, userMsgID, sessionID, req.Message, time.Now())
+		var questionTags []tags.TagHit
+		if tagSvc != nil {
+			if hits, err := tagSvc.TagMessage(accountID, userMsgID, req.Message); err != nil {
+				log.Printf("[tags] tag failed: %v", err)
+			} else {
+				questionTags = hits
+				if len(hits) > 0 {
+					log.Printf("[tags] message=%s tags=%v", userMsgID, hits)
+				}
+			}
+		}
 
 		modelName := cfg.Agent.DefaultModel
 		if req.Model != "" {
@@ -600,6 +612,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 			"workspace_id":  req.WorkspaceID,
 			"tool_steps":    toolSteps,
 			"cached_tokens": usage.CachedTokens,
+			"tags":          questionTags,
 		})
 	}
 }
@@ -1011,7 +1024,7 @@ func handleCreateToken(database *db.DB) gin.HandlerFunc {
 
 // ========== Message Processing ==========
 
-func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string, accountID int64) string {
+func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string, accountID int64, tagSvc *tags.Service) string {
 	modelName := cfg.Agent.DefaultModel
 	channel, err := findChannelForModel(database, accountID, modelName)
 	if err != nil {
@@ -1048,13 +1061,13 @@ func processMessage(database *db.DB, cfg *config.Config, sessionID string, messa
 	}
 
 	// Save messages to database
-	saveMessage(database, accountID, sessionID, "user", message, "", "", 0)
-	saveMessage(database, accountID, sessionID, "assistant", responseContent, modelName, channel.Name, resp.Usage.TotalTokens)
+	saveMessage(database, accountID, sessionID, "user", message, "", "", 0, tagSvc)
+	saveMessage(database, accountID, sessionID, "assistant", responseContent, modelName, channel.Name, resp.Usage.TotalTokens, tagSvc)
 
 	return responseContent
 }
 
-func saveMessage(database *db.DB, accountID int64, sessionID, role, content, model, provider string, tokens int) {
+func saveMessage(database *db.DB, accountID int64, sessionID, role, content, model, provider string, tokens int, tagSvc *tags.Service) string {
 	// Ensure session exists for this account
 	var count int
 	database.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", sessionID).Scan(&count)
@@ -1065,14 +1078,20 @@ func saveMessage(database *db.DB, accountID int64, sessionID, role, content, mod
 		`, sessionID, accountID, content[:min(50, len(content))], time.Now(), time.Now())
 	}
 
-	// Save message
+	msgID := uuid.New().String()
 	database.Exec(`
 		INSERT INTO messages (id, session_id, role, content, model, provider, tokens, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, uuid.New().String(), sessionID, role, content, model, provider, tokens, time.Now())
+	`, msgID, sessionID, role, content, model, provider, tokens, time.Now())
 
-	// Update session message count
 	database.Exec(`
 		UPDATE sessions SET message_count = message_count + 1, updated_at = ? WHERE id = ?
 	`, time.Now(), sessionID)
+
+	if role == "user" && tagSvc != nil && strings.TrimSpace(content) != "" {
+		if _, err := tagSvc.TagMessage(accountID, msgID, content); err != nil {
+			log.Printf("[tags] failed to tag message %s: %v", msgID, err)
+		}
+	}
+	return msgID
 }

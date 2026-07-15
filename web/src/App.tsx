@@ -7,6 +7,7 @@ import CoderPage from './pages/CoderPage'
 import DashboardPage from './pages/DashboardPage'
 import ChannelsPage from './pages/ChannelsPage'
 import SessionsPage from './pages/SessionsPage'
+import TagsPage from './pages/TagsPage'
 import SettingsPage from './pages/SettingsPage'
 import AccountsPage from './pages/AccountsPage'
 import LoginPage from './pages/LoginPage'
@@ -37,6 +38,7 @@ function ProtectedApp() {
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
+          <Route path="tags" element={<TagsPage />} />
           <Route
             path="accounts"
             element={isAdmin ? <AccountsPage /> : <Navigate to="/" replace />}

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/alex/codegateway/internal/account"
+	"github.com/alex/codegateway/internal/agent/tags"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
 	"github.com/gin-gonic/gin"
@@ -76,7 +77,7 @@ func (h *WSHub) run() {
 	}
 }
 
-func handleWebSocket(database *db.DB, cfg *config.Config, hub *WSHub) gin.HandlerFunc {
+func handleWebSocket(database *db.DB, cfg *config.Config, hub *WSHub, tagSvc *tags.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, ok := c.Get(account.AuthUserContextKey); !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
@@ -115,11 +116,11 @@ func handleWebSocket(database *db.DB, cfg *config.Config, hub *WSHub) gin.Handle
 		client.send <- welcomeData
 
 		go client.writePump()
-		go client.readPump(database, cfg, hub)
+		go client.readPump(database, cfg, hub, tagSvc)
 	}
 }
 
-func (c *WSClient) readPump(database *db.DB, cfg *config.Config, hub *WSHub) {
+func (c *WSClient) readPump(database *db.DB, cfg *config.Config, hub *WSHub, tagSvc *tags.Service) {
 	defer func() {
 		hub.unregister <- c
 		c.conn.Close()
@@ -146,7 +147,7 @@ func (c *WSClient) readPump(database *db.DB, cfg *config.Config, hub *WSHub) {
 
 		// Process message and get response
 		log.Printf("[chat/ws] recv account=%d session=%s bytes=%d", c.accountID, c.sessionID, len(msg.Content))
-		response := processMessage(database, cfg, c.sessionID, msg.Content, c.accountID)
+		response := processMessage(database, cfg, c.sessionID, msg.Content, c.accountID, tagSvc)
 
 		// Send response
 		respData, _ := json.Marshal(map[string]interface{}{
