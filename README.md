@@ -103,7 +103,31 @@ curl http://localhost:8080/v1/gateway/chat/completions \
     "model": "gpt-4o",
     "messages": [{"role": "user", "content": "Hello"}]
   }'
+
+# 列出可用模型（OpenAI 兼容）
+curl http://localhost:8080/v1/models
+
+# 查询单个模型
+curl http://localhost:8080/v1/models/mimo-auto
 ```
+
+模型列表响应格式与 OpenAI 一致：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "mimo-auto",
+      "object": "model",
+      "created": 1715367049,
+      "owned_by": "mimo"
+    }
+  ]
+}
+```
+
+SDK 可将 Base URL 设为 `http://localhost:8080/v1`，直接调用 `client.models.list()`。
 
 ### Agent 接口
 

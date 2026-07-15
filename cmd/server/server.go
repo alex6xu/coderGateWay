@@ -92,12 +92,15 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub)
 	v1 := r.Group("/v1")
 	{
 		v1.POST("/chat/completions", handleChatCompletions(database, cfg))
+		// OpenAI-compatible models API
 		v1.GET("/models", handleListModels(database))
+		v1.GET("/models/*model", handleRetrieveModel(database))
 
 		gateway := v1.Group("/gateway")
 		{
 			gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
 			gateway.GET("/models", handleListModels(database))
+			gateway.GET("/models/*model", handleRetrieveModel(database))
 			gateway.POST("/messages", handleClaudeMessages(database, cfg))
 			gateway.POST("/v1beta/*path", handleGemini(database, cfg))
 		}
