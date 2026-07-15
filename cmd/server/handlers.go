@@ -275,66 +275,6 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 	flusher.Flush()
 }
 
-func handleListModels(database *db.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		rows, err := database.Query(`
-			SELECT models, type FROM channels WHERE status = 1 ORDER BY priority DESC, weight DESC
-		`)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query channels"})
-			return
-		}
-		defer rows.Close()
-
-		seen := make(map[string]bool)
-		models := make([]map[string]interface{}, 0)
-
-		addModel := func(id string) {
-			if id == "" || seen[id] {
-				return
-			}
-			seen[id] = true
-			models = append(models, map[string]interface{}{
-				"id":       id,
-				"object":   "model",
-				"owned_by": "codegateway",
-			})
-		}
-
-		for rows.Next() {
-			var modelsJSON string
-			var chType int
-			if err := rows.Scan(&modelsJSON, &chType); err != nil {
-				continue
-			}
-
-			if chType == model.ChannelTypeMiMoFree {
-				for _, m := range provider.MiMoFreeAdvertisedModels() {
-					addModel(m)
-				}
-				continue
-			}
-
-			if modelsJSON == "" {
-				continue
-			}
-
-			var channelModels []string
-			if json.Unmarshal([]byte(modelsJSON), &channelModels) != nil {
-				continue
-			}
-			for _, m := range channelModels {
-				addModel(m)
-			}
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"object": "list",
-			"data":   models,
-		})
-	}
-}
-
 // ========== Agent Chat Handler ==========
 
 func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
