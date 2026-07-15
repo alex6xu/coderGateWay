@@ -183,11 +183,37 @@ CREATE TABLE IF NOT EXISTS workspaces (
     root_path TEXT NOT NULL,
     file_count INTEGER DEFAULT 0,
     size_bytes INTEGER DEFAULT 0,
+    source TEXT DEFAULT 'upload',
+    github_full_name TEXT DEFAULT '',
+    github_default_branch TEXT DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 CREATE INDEX IF NOT EXISTS idx_workspaces_user_id ON workspaces(user_id);
+
+-- GitHub OAuth connections (one per account)
+CREATE TABLE IF NOT EXISTS github_connections (
+    user_id INTEGER PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    token_type TEXT DEFAULT 'bearer',
+    scope TEXT DEFAULT '',
+    github_user_id INTEGER DEFAULT 0,
+    github_login TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- Short-lived OAuth CSRF states
+CREATE TABLE IF NOT EXISTS github_oauth_states (
+    state TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_github_oauth_states_expires ON github_oauth_states(expires_at);
 `
 
 // Indexes that require user_id columns. Created after upgrade migrations so existing
@@ -216,7 +242,35 @@ func Migrate(db *DB) error {
 		return fmt.Errorf("failed to create user_id indexes: %w", err)
 	}
 
+	if err := ensureWorkspaceGitColumns(db); err != nil {
+		return err
+	}
+
 	log.Println("Database migrations completed")
+	return nil
+}
+
+func ensureWorkspaceGitColumns(db *DB) error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"source", "ALTER TABLE workspaces ADD COLUMN source TEXT DEFAULT 'upload'"},
+		{"github_full_name", "ALTER TABLE workspaces ADD COLUMN github_full_name TEXT DEFAULT ''"},
+		{"github_default_branch", "ALTER TABLE workspaces ADD COLUMN github_default_branch TEXT DEFAULT ''"},
+	} {
+		has, err := tableHasColumn(db, "workspaces", col.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		log.Printf("Migrating workspaces: adding %s", col.name)
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("failed to add workspaces.%s: %w", col.name, err)
+		}
+	}
 	return nil
 }
 

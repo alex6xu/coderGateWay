@@ -61,6 +61,18 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        <div className="bg-card border border-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-foreground mb-2">GitHub 仓库接入</h3>
+          <p className="text-[13px] text-muted-foreground leading-relaxed">
+            在 Code 页可授权 GitHub 并导入仓库为云端工作区。服务端需配置 OAuth App：
+            <code className="mx-1 text-[12px]">github.client_id</code>/
+            <code className="mx-1 text-[12px]">client_secret</code>
+            （或环境变量 <code className="text-[12px]">GITHUB_CLIENT_ID</code> /
+            <code className="text-[12px]">GITHUB_CLIENT_SECRET</code>），回调地址为
+            <code className="mx-1 text-[12px]">/v1/github/callback</code>。
+          </p>
+        </div>
+
         <form onSubmit={onChangePassword} className="bg-card border border-border rounded-xl p-5 space-y-4">
           <h3 className="text-sm font-semibold text-foreground">修改密码</h3>
           <div>

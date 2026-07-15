@@ -15,14 +15,17 @@ import (
 
 // Workspace is a cloud-side code directory owned by an account.
 type Workspace struct {
-	ID        string    `json:"id"`
-	UserID    int64     `json:"user_id"`
-	Name      string    `json:"name"`
-	RootPath  string    `json:"-"`
-	FileCount int       `json:"file_count"`
-	SizeBytes int64     `json:"size_bytes"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	UserID              int64     `json:"user_id"`
+	Name                string    `json:"name"`
+	RootPath            string    `json:"-"`
+	FileCount           int       `json:"file_count"`
+	SizeBytes           int64     `json:"size_bytes"`
+	Source              string    `json:"source,omitempty"`
+	GitHubFullName      string    `json:"github_full_name,omitempty"`
+	GitHubDefaultBranch string    `json:"github_default_branch,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // Manager persists workspaces under a data root.
@@ -58,8 +61,8 @@ func (m *Manager) CreateEmpty(accountID int64, name string) (*Workspace, error) 
 
 	now := time.Now()
 	_, err := m.db.Exec(`
-		INSERT INTO workspaces (id, user_id, name, root_path, file_count, size_bytes, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+		INSERT INTO workspaces (id, user_id, name, root_path, file_count, size_bytes, source, github_full_name, github_default_branch, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 0, 0, 'upload', '', '', ?, ?)
 	`, id, accountID, name, root, now, now)
 	if err != nil {
 		_ = os.RemoveAll(root)
@@ -71,8 +74,45 @@ func (m *Manager) CreateEmpty(accountID int64, name string) (*Workspace, error) 
 		UserID:    accountID,
 		Name:      name,
 		RootPath:  root,
+		Source:    "upload",
 		CreatedAt: now,
 		UpdatedAt: now,
+	}, nil
+}
+
+// CreateFromGitHub creates an empty workspace marked as imported from GitHub.
+func (m *Manager) CreateFromGitHub(accountID int64, name, fullName, branch string) (*Workspace, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = fullName
+	}
+	if name == "" {
+		name = "github-project"
+	}
+	id := uuid.NewString()
+	root := m.RootFor(accountID, id)
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create workspace dir: %w", err)
+	}
+	now := time.Now()
+	_, err := m.db.Exec(`
+		INSERT INTO workspaces (id, user_id, name, root_path, file_count, size_bytes, source, github_full_name, github_default_branch, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 0, 0, 'github', ?, ?, ?, ?)
+	`, id, accountID, name, root, fullName, branch, now, now)
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("failed to insert workspace: %w", err)
+	}
+	return &Workspace{
+		ID:                  id,
+		UserID:              accountID,
+		Name:                name,
+		RootPath:            root,
+		Source:              "github",
+		GitHubFullName:      fullName,
+		GitHubDefaultBranch: branch,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}, nil
 }
 
@@ -80,10 +120,14 @@ func (m *Manager) CreateEmpty(accountID int64, name string) (*Workspace, error) 
 func (m *Manager) Get(accountID int64, id string) (*Workspace, error) {
 	var ws Workspace
 	err := m.db.QueryRow(`
-		SELECT id, user_id, name, root_path, file_count, size_bytes, created_at, updated_at
+		SELECT id, user_id, name, root_path, file_count, size_bytes,
+		       COALESCE(source, 'upload'), COALESCE(github_full_name, ''), COALESCE(github_default_branch, ''),
+		       created_at, updated_at
 		FROM workspaces WHERE id = ? AND user_id = ?
 	`, id, accountID).Scan(
-		&ws.ID, &ws.UserID, &ws.Name, &ws.RootPath, &ws.FileCount, &ws.SizeBytes, &ws.CreatedAt, &ws.UpdatedAt,
+		&ws.ID, &ws.UserID, &ws.Name, &ws.RootPath, &ws.FileCount, &ws.SizeBytes,
+		&ws.Source, &ws.GitHubFullName, &ws.GitHubDefaultBranch,
+		&ws.CreatedAt, &ws.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("workspace not found")
@@ -94,7 +138,9 @@ func (m *Manager) Get(accountID int64, id string) (*Workspace, error) {
 // List returns workspaces for an account.
 func (m *Manager) List(accountID int64) ([]*Workspace, error) {
 	rows, err := m.db.Query(`
-		SELECT id, user_id, name, root_path, file_count, size_bytes, created_at, updated_at
+		SELECT id, user_id, name, root_path, file_count, size_bytes,
+		       COALESCE(source, 'upload'), COALESCE(github_full_name, ''), COALESCE(github_default_branch, ''),
+		       created_at, updated_at
 		FROM workspaces WHERE user_id = ? ORDER BY updated_at DESC
 	`, accountID)
 	if err != nil {
@@ -106,7 +152,9 @@ func (m *Manager) List(accountID int64) ([]*Workspace, error) {
 	for rows.Next() {
 		var ws Workspace
 		if err := rows.Scan(
-			&ws.ID, &ws.UserID, &ws.Name, &ws.RootPath, &ws.FileCount, &ws.SizeBytes, &ws.CreatedAt, &ws.UpdatedAt,
+			&ws.ID, &ws.UserID, &ws.Name, &ws.RootPath, &ws.FileCount, &ws.SizeBytes,
+			&ws.Source, &ws.GitHubFullName, &ws.GitHubDefaultBranch,
+			&ws.CreatedAt, &ws.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,6 +17,17 @@ type Config struct {
 	Gateway  GatewayConfig  `yaml:"gateway"`
 	Platform PlatformConfig `yaml:"platforms"`
 	Billing  BillingConfig  `yaml:"billing"`
+	GitHub   GitHubConfig   `yaml:"github"`
+}
+
+// GitHubConfig enables OAuth and repository import into workspaces.
+type GitHubConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RedirectURL  string `yaml:"redirect_url"` // e.g. http://localhost:8080/v1/github/callback
+	FrontendURL  string `yaml:"frontend_url"` // e.g. http://localhost:5173/code
+	Scopes       string `yaml:"scopes"`       // default: read:user repo
 }
 
 type ServerConfig struct {
@@ -148,8 +160,9 @@ func Load() (*Config, error) {
 
 	// Check if config file exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Return default config
-		return defaultConfig(), nil
+		cfg := defaultConfig()
+		applyEnvOverrides(cfg)
+		return cfg, nil
 	}
 
 	// Read config file
@@ -164,6 +177,8 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	applyEnvOverrides(cfg)
+
 	// Ensure data directory exists
 	dataDir := filepath.Dir(cfg.Database.DSN)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -171,6 +186,36 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("GITHUB_CLIENT_ID"); v != "" {
+		cfg.GitHub.ClientID = v
+	}
+	if v := os.Getenv("GITHUB_CLIENT_SECRET"); v != "" {
+		cfg.GitHub.ClientSecret = v
+	}
+	if v := os.Getenv("GITHUB_REDIRECT_URL"); v != "" {
+		cfg.GitHub.RedirectURL = v
+	}
+	if v := os.Getenv("GITHUB_FRONTEND_URL"); v != "" {
+		cfg.GitHub.FrontendURL = v
+	}
+	if v := os.Getenv("GITHUB_ENABLED"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.GitHub.Enabled = true
+	}
+	if cfg.GitHub.ClientID != "" && cfg.GitHub.ClientSecret != "" {
+		cfg.GitHub.Enabled = true
+	}
+	if cfg.GitHub.Scopes == "" {
+		cfg.GitHub.Scopes = "read:user repo"
+	}
+	if cfg.GitHub.FrontendURL == "" {
+		cfg.GitHub.FrontendURL = "/code"
+	}
+	if cfg.GitHub.RedirectURL == "" && cfg.Server.Port > 0 {
+		cfg.GitHub.RedirectURL = fmt.Sprintf("http://localhost:%d/v1/github/callback", cfg.Server.Port)
+	}
 }
 
 func defaultConfig() *Config {
@@ -251,6 +296,12 @@ func defaultConfig() *Config {
 					Output: 0.28,
 				},
 			},
+		},
+		GitHub: GitHubConfig{
+			Enabled:     false,
+			Scopes:      "read:user repo",
+			FrontendURL: "/code",
+			RedirectURL: "http://localhost:8080/v1/github/callback",
 		},
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/alex/codegateway/internal/agent/memory"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
+	"github.com/alex/codegateway/internal/githubvcs"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 )
@@ -48,6 +49,12 @@ func Run() error {
 
 	workspaceMgr := workspace.NewManager(database.DB, "./data/workspaces")
 	memSvc := memory.NewMemoryService(database.DB)
+	ghSvc := githubvcs.NewService(database.DB, cfg.GitHub)
+	if ghSvc.Configured() {
+		log.Printf("GitHub OAuth enabled (client_id=%s…)", trimID(cfg.GitHub.ClientID))
+	} else {
+		log.Printf("GitHub OAuth disabled (set github.client_id/secret or GITHUB_CLIENT_ID/SECRET)")
+	}
 
 	// Initialize default channels for the default account
 	initDefaultChannels(database, cfg, defaultAccount.ID)
@@ -60,7 +67,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc)
+	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -81,7 +88,7 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -122,6 +129,9 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			auth.POST("/change-password", requireAuth(accountMgr), handleChangePassword(accountMgr))
 		}
 
+		// GitHub OAuth callback must be public (browser redirect); state binds to user.
+		v1.GET("/github/callback", handleGitHubCallback(ghSvc))
+
 		protected := v1.Group("")
 		protected.Use(requireAuth(accountMgr))
 		{
@@ -155,6 +165,15 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				wsAPI.GET("/:id/download", handleDownloadWorkspace(workspaceMgr))
 			}
 
+			ghAPI := protected.Group("/github")
+			{
+				ghAPI.GET("/status", handleGitHubStatus(ghSvc))
+				ghAPI.GET("/authorize", handleGitHubAuthorize(ghSvc))
+				ghAPI.DELETE("/disconnect", handleGitHubDisconnect(ghSvc))
+				ghAPI.GET("/repos", handleGitHubListRepos(ghSvc))
+				ghAPI.POST("/import", handleGitHubImportRepo(ghSvc, workspaceMgr))
+			}
+
 			admin := protected.Group("/admin")
 			{
 				admin.GET("/stats", handleGetStats(database))
@@ -184,6 +203,13 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			}
 		}
 	}
+}
+
+func trimID(id string) string {
+	if len(id) <= 6 {
+		return id
+	}
+	return id[:6]
 }
 
 func initDefaultChannels(database *db.DB, cfg *config.Config, accountID int64) {

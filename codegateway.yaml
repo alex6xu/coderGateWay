@@ -121,3 +121,13 @@ billing:
     glm-5.2:
       input: 1.0
       output: 4.0
+
+# GitHub OAuth — authorize repos and import as Coder workspaces
+# Or set GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET / GITHUB_REDIRECT_URL / GITHUB_FRONTEND_URL
+github:
+  enabled: false
+  client_id: ""
+  client_secret: ""
+  redirect_url: "http://localhost:8080/v1/github/callback"
+  frontend_url: "/code"
+  scopes: "read:user repo"

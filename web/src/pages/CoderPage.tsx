@@ -23,6 +23,21 @@ interface WorkspaceInfo {
   size_bytes: number
   created_at: string
   updated_at: string
+  source?: string
+  github_full_name?: string
+  github_default_branch?: string
+}
+
+interface GitHubRepo {
+  id: number
+  full_name: string
+  name: string
+  owner: string
+  private: boolean
+  description: string
+  default_branch: string
+  html_url: string
+  updated_at: string
 }
 
 const quickTasks = [
@@ -76,6 +91,14 @@ export default function CoderPage() {
   const [workspaceId, setWorkspaceId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
+  const [ghConfigured, setGhConfigured] = useState(false)
+  const [ghConnected, setGhConnected] = useState(false)
+  const [ghLogin, setGhLogin] = useState('')
+  const [ghRepos, setGhRepos] = useState<GitHubRepo[]>([])
+  const [ghPanelOpen, setGhPanelOpen] = useState(false)
+  const [ghLoading, setGhLoading] = useState(false)
+  const [ghImporting, setGhImporting] = useState('')
+  const [ghError, setGhError] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const dirInputRef = useRef<HTMLInputElement>(null)
@@ -85,8 +108,28 @@ export default function CoderPage() {
   useEffect(() => {
     fetchModels()
     fetchWorkspaces()
+    fetchGitHubStatus()
     setMessages([])
     setSessionId('')
+
+    const params = new URLSearchParams(window.location.search)
+    const gh = params.get('github')
+    if (gh === 'connected') {
+      setGhPanelOpen(true)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'system',
+          content: `GitHub 已授权${params.get('login') ? `（@${params.get('login')}）` : ''}。可从仓库列表导入项目到云端工作区。`,
+          timestamp: new Date(),
+        },
+      ])
+      window.history.replaceState({}, '', window.location.pathname)
+    } else if (gh === 'error') {
+      setUploadError(params.get('message') || 'GitHub 授权失败')
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [currentAccount?.id])
 
   useEffect(() => {
@@ -129,6 +172,121 @@ export default function CoderPage() {
       }
     } catch (error) {
       console.error('Failed to fetch workspaces:', error)
+    }
+  }
+
+  const fetchGitHubStatus = async (): Promise<{ configured: boolean; connected: boolean }> => {
+    try {
+      const response = await apiFetch('/v1/github/status', {}, currentAccount?.id)
+      if (!response.ok) return { configured: false, connected: false }
+      const data = await response.json()
+      setGhConfigured(!!data.configured)
+      setGhConnected(!!data.connected)
+      setGhLogin(data.github_login || '')
+      return { configured: !!data.configured, connected: !!data.connected }
+    } catch (error) {
+      console.error('Failed to fetch github status:', error)
+      return { configured: false, connected: false }
+    }
+  }
+
+  const connectGitHub = async () => {
+    setGhError('')
+    try {
+      const response = await apiFetch('/v1/github/authorize', {}, currentAccount?.id)
+      const data = await response.json()
+      if (!response.ok) {
+        setGhError(data.error || '无法开始 GitHub 授权')
+        return
+      }
+      if (data.authorize_url) {
+        window.location.href = data.authorize_url
+      }
+    } catch {
+      setGhError('无法开始 GitHub 授权')
+    }
+  }
+
+  const disconnectGitHub = async () => {
+    setGhError('')
+    try {
+      await apiFetch('/v1/github/disconnect', { method: 'DELETE' }, currentAccount?.id)
+      setGhConnected(false)
+      setGhLogin('')
+      setGhRepos([])
+    } catch {
+      setGhError('断开失败')
+    }
+  }
+
+  const loadGitHubRepos = async () => {
+    setGhLoading(true)
+    setGhError('')
+    try {
+      const response = await apiFetch('/v1/github/repos?per_page=50', {}, currentAccount?.id)
+      const data = await response.json()
+      if (!response.ok) {
+        setGhError(data.error || '加载仓库失败')
+        return
+      }
+      setGhRepos(data.repos || [])
+    } catch {
+      setGhError('加载仓库失败')
+    } finally {
+      setGhLoading(false)
+    }
+  }
+
+  const openGitHubPanel = async () => {
+    setGhPanelOpen(true)
+    setGhError('')
+    const status = await fetchGitHubStatus()
+    if (status.connected) {
+      await loadGitHubRepos()
+    }
+  }
+
+  const importGitHubRepo = async (repo: GitHubRepo) => {
+    setGhImporting(repo.full_name)
+    setGhError('')
+    try {
+      const response = await apiFetch(
+        '/v1/github/import',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner: repo.owner,
+            repo: repo.name,
+            branch: repo.default_branch || undefined,
+            name: repo.name,
+          }),
+        },
+        currentAccount?.id,
+      )
+      const data = await response.json()
+      if (!response.ok) {
+        setGhError(data.error || '导入失败')
+        return
+      }
+      await fetchWorkspaces()
+      if (data.workspace?.id) {
+        setWorkspaceId(data.workspace.id)
+        setGhPanelOpen(false)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'system',
+            content: `已从 GitHub 导入「${data.workspace.github_full_name || data.workspace.name}」到云端工作区（${data.workspace.file_count} 个文件，${formatBytes(data.workspace.size_bytes)}）。可直接描述要改的功能。`,
+            timestamp: new Date(),
+          },
+        ])
+      }
+    } catch {
+      setGhError('导入失败，请重试')
+    } finally {
+      setGhImporting('')
     }
   }
 
@@ -391,7 +549,7 @@ export default function CoderPage() {
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-foreground">Code</h2>
           <p className="text-[11px] text-muted-foreground truncate">
-            选择本地目录上传云端后，用自然语言让 Agent 改代码
+            上传本地目录或授权 GitHub 仓库到云端，用自然语言让 Agent 改代码
             {sessionId && <span className="ml-2">Session: {sessionId.substring(0, 8)}...</span>}
           </p>
         </div>
@@ -437,6 +595,18 @@ export default function CoderPage() {
         >
           {uploading ? '上传中…' : '选择本地目录并上传云端'}
         </button>
+        <button
+          onClick={() => {
+            if (ghConnected) openGitHubPanel()
+            else {
+              setGhPanelOpen(true)
+              setGhError('')
+            }
+          }}
+          className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent text-foreground"
+        >
+          {ghConnected ? `GitHub${ghLogin ? ` @${ghLogin}` : ''}` : '连接 GitHub'}
+        </button>
         <select
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
@@ -445,7 +615,8 @@ export default function CoderPage() {
           <option value="">未选择工作区</option>
           {workspaces.map((w) => (
             <option key={w.id} value={w.id}>
-              {w.name} ({w.file_count} files)
+              {w.source === 'github' ? 'GH · ' : ''}
+              {w.github_full_name || w.name} ({w.file_count} files)
             </option>
           ))}
         </select>
@@ -459,11 +630,99 @@ export default function CoderPage() {
         )}
         {activeWorkspace && (
           <span className="text-[11px] text-muted-foreground">
-            云端：{activeWorkspace.name} · {activeWorkspace.file_count} 文件 · {formatBytes(activeWorkspace.size_bytes)}
+            云端：{activeWorkspace.github_full_name || activeWorkspace.name} · {activeWorkspace.file_count}{' '}
+            文件 · {formatBytes(activeWorkspace.size_bytes)}
+            {activeWorkspace.source === 'github' ? ' · GitHub' : ''}
           </span>
         )}
         {uploadError && <span className="text-[12px] text-red-500">{uploadError}</span>}
       </div>
+
+      {ghPanelOpen && (
+        <div className="px-6 py-4 border-b border-border bg-background">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-sm font-medium text-foreground">从 GitHub 导入仓库</h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                授权后可将仓库拉取为云端工作区，供 Agent 读写代码
+              </p>
+            </div>
+            <button
+              onClick={() => setGhPanelOpen(false)}
+              className="h-7 px-2 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              关闭
+            </button>
+          </div>
+
+          {!ghConfigured && (
+            <p className="text-[12px] text-amber-600 dark:text-amber-400 mb-2">
+              服务端尚未配置 GitHub OAuth。请在 `codegateway.yaml` 设置 `github.client_id` /
+              `client_secret`，或环境变量 `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`，并在 GitHub
+              App/OAuth App 中将回调设为 `/v1/github/callback`。
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            {!ghConnected ? (
+              <button
+                onClick={connectGitHub}
+                disabled={!ghConfigured}
+                className="h-8 px-3 text-[12px] bg-foreground text-background rounded-md disabled:opacity-50"
+              >
+                授权 GitHub
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={loadGitHubRepos}
+                  disabled={ghLoading}
+                  className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent"
+                >
+                  {ghLoading ? '加载中…' : '刷新仓库列表'}
+                </button>
+                <button
+                  onClick={disconnectGitHub}
+                  className="h-8 px-3 text-[12px] text-muted-foreground border border-border rounded-md hover:bg-accent"
+                >
+                  断开授权
+                </button>
+              </>
+            )}
+            {ghError && <span className="text-[12px] text-red-500">{ghError}</span>}
+          </div>
+
+          {ghConnected && (
+            <div className="max-h-56 overflow-auto border border-border rounded-md divide-y divide-border">
+              {ghRepos.length === 0 && !ghLoading && (
+                <div className="px-3 py-4 text-[12px] text-muted-foreground">暂无仓库，点击刷新加载</div>
+              )}
+              {ghRepos.map((repo) => (
+                <div key={repo.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium text-foreground truncate">
+                      {repo.full_name}
+                      {repo.private ? (
+                        <span className="ml-2 text-[10px] text-muted-foreground">private</span>
+                      ) : null}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {repo.description || repo.default_branch}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => importGitHubRepo(repo)}
+                    disabled={!!ghImporting}
+                    className="h-7 px-2.5 text-[11px] bg-primary text-primary-foreground rounded-md disabled:opacity-50 flex-shrink-0"
+                  >
+                    {ghImporting === repo.full_name ? '导入中…' : '导入'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-6 space-y-4">
         {messages.length === 0 ? (
