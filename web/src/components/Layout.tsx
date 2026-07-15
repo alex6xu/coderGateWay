@@ -2,6 +2,7 @@ import { Outlet, Link, useLocation } from 'react-router-dom'
 
 const navigation = [
   { name: 'Chat', href: '/', icon: '💬' },
+  { name: 'Code', href: '/code', icon: '🛠️' },
   { name: 'Dashboard', href: '/dashboard', icon: '📊' },
   { name: 'Channels', href: '/channels', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
@@ -34,13 +35,19 @@ export default function Layout() {
         {/* Navigation */}
         <nav className="flex-1 px-3 py-3 space-y-0.5">
           {navigation.map((item) => {
-            const isActive = location.pathname === item.href
+            const isActive =
+              item.href === '/'
+                ? location.pathname === '/'
+                : location.pathname === item.href || location.pathname.startsWith(item.href + '/')
+            // Also highlight Code for legacy /coder path
+            const codeActive = item.href === '/code' && (location.pathname === '/coder' || location.pathname.startsWith('/coder/'))
+            const active = isActive || codeActive
             return (
               <Link
                 key={item.name}
                 to={item.href}
                 className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-[13px] font-medium transition-colors ${
-                  isActive
+                  active
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
