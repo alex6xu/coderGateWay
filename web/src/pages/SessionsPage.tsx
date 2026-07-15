@@ -60,6 +60,7 @@ export default function SessionsPage() {
 
   const platformIcons: Record<string, string> = {
     web: '🌐',
+    coder: '🛠️',
     telegram: '📱',
     terminal: '💻',
     wechat: '💬',

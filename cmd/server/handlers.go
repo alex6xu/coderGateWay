@@ -342,11 +342,19 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		var req struct {
 			Message   string `json:"message" binding:"required"`
 			SessionID string `json:"session_id"`
+			Mode      string `json:"mode"`  // "coder" for code development, empty for general chat
+			Model     string `json:"model"` // optional model override
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+
+		mode := strings.ToLower(strings.TrimSpace(req.Mode))
+		platform := "web"
+		if mode == "coder" {
+			platform = "coder"
 		}
 
 		// Create or get session
@@ -355,8 +363,8 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 			sessionID = uuid.New().String()
 			_, err := database.Exec(`
 				INSERT INTO sessions (id, title, platform, message_count, created_at, updated_at)
-				VALUES (?, ?, 'web', 0, ?, ?)
-			`, sessionID, req.Message[:min(50, len(req.Message))], time.Now(), time.Now())
+				VALUES (?, ?, ?, 0, ?, ?)
+			`, sessionID, req.Message[:min(50, len(req.Message))], platform, time.Now(), time.Now())
 			if err != nil {
 				// Continue anyway, session might already exist
 			}
@@ -371,6 +379,9 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 
 		// Find a suitable model
 		modelName := cfg.Agent.DefaultModel
+		if req.Model != "" {
+			modelName = req.Model
+		}
 		channel, err := findChannelForModel(database, modelName)
 		if err != nil {
 			// Try any available channel
@@ -382,7 +393,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 
 		modelName = resolveModelForChannel(channel, modelName)
-		log.Printf("[chat/agent] session=%s model=%s channel=%s(type=%d)", sessionID, modelName, channel.Name, channel.Type)
+		log.Printf("[chat/agent] session=%s mode=%s model=%s channel=%s(type=%d)", sessionID, mode, modelName, channel.Name, channel.Type)
 
 		prov, err := createProviderFromChannel(channel)
 		if err != nil {
@@ -395,7 +406,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 		maxTokens := cfg.Agent.MaxTokens
 		resp, err := prov.ChatCompletion(c.Request.Context(), &provider.ChatCompletionRequest{
 			Model:       modelName,
-			Messages:    buildAgentMessages(channel, modelName, req.Message),
+			Messages:    buildAgentMessages(channel, modelName, req.Message, mode),
 			Temperature: &temperature,
 			MaxTokens:   &maxTokens,
 		})
@@ -643,8 +654,14 @@ func resolveModelForChannel(channel *model.Channel, modelName string) string {
 	return modelName
 }
 
-func buildAgentMessages(channel *model.Channel, modelName, userMessage string) []provider.Message {
+func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode string) []provider.Message {
 	if channel.Type == model.ChannelTypeMiMoFree {
+		if mode == "coder" {
+			return []provider.Message{{
+				Role: "user",
+				Content: "[CodeGateway Coder mode] Act as an expert software engineer. Prefer concrete code, diffs, and step-by-step implementation guidance.\n\n" + userMessage,
+			}}
+		}
 		return []provider.Message{{Role: "user", Content: userMessage}}
 	}
 
@@ -652,6 +669,15 @@ func buildAgentMessages(channel *model.Channel, modelName, userMessage string) [
 		"You are a helpful AI assistant. When asked about your identity, say you are the %s model served by CodeGateway.",
 		modelName,
 	)
+	if mode == "coder" {
+		system = fmt.Sprintf(
+			"You are CodeGateway Coder, an expert software engineering assistant powered by %s. "+
+				"Focus on writing, reviewing, debugging, refactoring, and explaining code. "+
+				"Prefer concrete implementations, clear diffs, and actionable steps. "+
+				"Use fenced markdown code blocks with language tags. Ask clarifying questions only when necessary.",
+			modelName,
+		)
+	}
 	return []provider.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: userMessage},
@@ -803,7 +829,7 @@ func processMessage(database *db.DB, cfg *config.Config, sessionID string, messa
 	maxTokens := cfg.Agent.MaxTokens
 	resp, err := prov.ChatCompletion(context.Background(), &provider.ChatCompletionRequest{
 		Model:       modelName,
-		Messages:    buildAgentMessages(channel, modelName, message),
+		Messages:    buildAgentMessages(channel, modelName, message, ""),
 		Temperature: &temperature,
 		MaxTokens:   &maxTokens,
 	})
