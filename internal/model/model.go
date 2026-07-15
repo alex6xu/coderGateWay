@@ -130,6 +130,7 @@ const (
 	ChannelTypeMiMo     = 6
 	ChannelTypeMiMoFree = 7
 	ChannelTypeMiMoCode = 8
+	ChannelTypeAgnes    = 9
 	ChannelTypeCustom   = 99
 )
 

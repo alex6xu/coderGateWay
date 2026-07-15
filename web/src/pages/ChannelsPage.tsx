@@ -110,6 +110,7 @@ export default function ChannelsPage() {
     6: { name: 'MiMo', color: 'text-orange-400 bg-orange-500/10' },
     7: { name: 'MiMo Free', color: 'text-red-400 bg-red-500/10' },
     8: { name: 'MiMoCode', color: 'text-pink-400 bg-pink-500/10' },
+    9: { name: 'Agnes', color: 'text-teal-400 bg-teal-500/10' },
     99: { name: 'Custom', color: 'text-gray-400 bg-gray-500/10' },
   }
 
@@ -121,6 +122,7 @@ export default function ChannelsPage() {
     6: 'https://api.xiaomimimo.com/v1',
     7: 'https://api.xiaomimimo.com',
     8: 'http://127.0.0.1:10001',
+    9: 'https://apihub.agnes-ai.com/v1',
   }
 
   return (
@@ -184,6 +186,7 @@ export default function ChannelsPage() {
                   <option value={6}>MiMo (API)</option>
                   <option value={7}>MiMo Free (mimo-auto 直连)</option>
                   <option value={8}>MiMoCode (本地 mimo serve)</option>
+                  <option value={9}>Agnes (OpenAI 兼容)</option>
                   <option value={99}>Custom</option>
                 </select>
               </div>

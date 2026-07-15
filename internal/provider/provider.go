@@ -123,6 +123,7 @@ const (
 	ProviderTypeMiMo      ProviderType = "mimo"
 	ProviderTypeMiMoFree  ProviderType = "mimo-free"
 	ProviderTypeMiMoCode  ProviderType = "mimocode"
+	ProviderTypeAgnes     ProviderType = "agnes"
 	ProviderTypeCustom    ProviderType = "custom"
 )
 
@@ -168,6 +169,8 @@ func NewProvider(config *ProviderConfig) (Provider, error) {
 		return NewMiMoFreeProvider(config), nil
 	case ProviderTypeMiMoCode:
 		return NewMiMoCodeProvider(config), nil
+	case ProviderTypeAgnes:
+		return NewOpenAIProvider(config), nil
 	case ProviderTypeCustom:
 		return NewCustomProvider(config), nil
 	default:
@@ -228,6 +231,9 @@ func (r *Registry) GetProviderForModel(model string) (Provider, error) {
 	}
 	if strings.HasPrefix(model, "deepseek-") {
 		return r.Get("deepseek")
+	}
+	if strings.HasPrefix(model, "agnes-") {
+		return r.Get("agnes")
 	}
 
 	return nil, fmt.Errorf("no provider found for model: %s", model)
