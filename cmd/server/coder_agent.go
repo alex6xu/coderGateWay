@@ -25,6 +25,7 @@ func runCoderAgent(
 	toolResultMaxChars int,
 	toolResultKeepRecent int,
 ) (string, provider.Usage, []map[string]string, error) {
+	_ = toolResultKeepRecent // mid-loop rewrite disabled for prefix cache; kept for API compat
 	if maxIterations <= 0 {
 		maxIterations = 8
 	}
@@ -44,9 +45,9 @@ func runCoderAgent(
 	var usage provider.Usage
 	var steps []map[string]string
 
+	// Do not rewrite earlier tool messages inside the loop — that busts prompt
+	// prefix cache. Only cap newly appended tool results below.
 	for i := 0; i < maxIterations; i++ {
-		promptctx.CompactToolMessages(messages, toolResultKeepRecent, toolResultMaxChars)
-
 		temp := temperature
 		mt := maxTokens
 		resp, err := prov.ChatCompletion(ctx, &provider.ChatCompletionRequest{
@@ -99,11 +100,8 @@ func runCoderAgent(
 				}
 			}
 
-			// Cap what we keep for the next model turn immediately
-			modelContent := content
-			if toolResultMaxChars > 0 && len(modelContent) > toolResultMaxChars {
-				modelContent = modelContent[:toolResultMaxChars] + "\n…[truncated tool result]"
-			}
+			// Cap only this new tool result — do not rewrite older tool messages.
+			modelContent := promptctx.TruncateToolResult(content, toolResultMaxChars)
 
 			steps = append(steps, map[string]string{
 				"tool":   tc.Function.Name,

@@ -264,17 +264,64 @@ func (s *MemoryService) WriteSessionMemory(sessionID string, content string) err
 	})
 }
 
+// SessionCheckpoint is the stable, infrequently updated session summary.
+type SessionCheckpoint struct {
+	Content      string
+	AfterMsgID   string // history after this message id is the append-only suffix
+	Raw          string
+}
+
+const checkpointCutoffPrefix = "[cutoff:"
+
 // UpsertSessionMemory replaces the session checkpoint memory.
 func (s *MemoryService) UpsertSessionMemory(sessionID string, content string) error {
+	return s.UpsertSessionCheckpoint(sessionID, content, "")
+}
+
+// UpsertSessionCheckpoint stores a stable checkpoint and optional history cutoff.
+// Messages at/after AfterMsgID form the append-only prompt suffix until the next fold.
+func (s *MemoryService) UpsertSessionCheckpoint(sessionID, content, afterMsgID string) error {
 	path := fmt.Sprintf("sessions/%s/checkpoint.md", sessionID)
 	_ = s.Delete(path)
+	body := strings.TrimSpace(content)
+	if afterMsgID != "" {
+		body = fmt.Sprintf("%s%s]\n%s", checkpointCutoffPrefix, afterMsgID, body)
+	}
 	return s.Write(&MemoryEntry{
 		Path:    path,
 		Scope:   "sessions",
 		ScopeID: sessionID,
 		Type:    "checkpoint",
-		Content: content,
+		Content: body,
 	})
+}
+
+// GetSessionCheckpoint loads the stable session checkpoint (not FTS-ranked).
+func (s *MemoryService) GetSessionCheckpoint(sessionID string) (*SessionCheckpoint, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	path := fmt.Sprintf("sessions/%s/checkpoint.md", sessionID)
+	var content string
+	err := s.db.QueryRow(
+		`SELECT content FROM memory_fts WHERE path = ? AND type = 'checkpoint' LIMIT 1`,
+		path,
+	).Scan(&content)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cp := &SessionCheckpoint{Raw: content, Content: content}
+	if strings.HasPrefix(content, checkpointCutoffPrefix) {
+		rest := strings.TrimPrefix(content, checkpointCutoffPrefix)
+		if i := strings.IndexByte(rest, ']'); i >= 0 {
+			cp.AfterMsgID = rest[:i]
+			cp.Content = strings.TrimSpace(rest[i+1:])
+		}
+	}
+	return cp, nil
 }
 
 // WriteGlobalMemory writes a global memory

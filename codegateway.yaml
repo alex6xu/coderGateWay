@@ -19,11 +19,14 @@ agent:
   max_iterations: 12
   # Completion / generation cap (not the full context window)
   max_tokens: 4096
-  # Soft budget for prompt assembly (history + memory + system)
+  # Soft budget for prompt assembly (stable prefix + variable user suffix)
+  # Layout: fixed system → session checkpoint → append-only history → current user
+  # (FTS retrieval is attached to the current user message to protect prefix cache)
   context_budget_tokens: 8000
   history_max_turns: 8
   tool_result_max_chars: 4000
   tool_result_keep_recent: 2
+  # Infrequent fold of older turns into checkpoint (advances history cutoff)
   summarize_every_turns: 10
   temperature: 0.7
   
