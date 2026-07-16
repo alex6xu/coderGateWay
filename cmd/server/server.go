@@ -154,6 +154,8 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			{
 				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc))
 				agent.GET("/sessions", handleListSessions(database))
+				agent.POST("/sessions/import/preview", handleImportMDPreview())
+				agent.POST("/sessions/import", handleImportMDSession(database, tagSvc))
 				agent.GET("/sessions/:id", handleGetSession(database))
 				agent.GET("/tags", handleListTags(tagSvc))
 				agent.GET("/tags/overview", handleTagOverview(tagSvc))

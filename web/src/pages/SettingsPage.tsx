@@ -61,6 +61,16 @@ export default function SettingsPage() {
           </div>
         </div>
 
+		<div className="bg-card border border-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-foreground mb-2">导入 Markdown 对话</h3>
+          <p className="text-[13px] text-muted-foreground leading-relaxed">
+            在 Sessions 页可导入 <code className="text-[12px]">.md</code> 对话记录。支持
+            <code className="mx-1 text-[12px]">## User / ## Assistant</code>、
+            <code className="mx-1 text-[12px]">用户/助手</code>、
+            <code className="mx-1 text-[12px]">**User**:</code> 等格式，导入后进入会话并可自动打标签。
+          </p>
+        </div>
+
         <div className="bg-card border border-border rounded-xl p-5">
           <h3 className="text-sm font-semibold text-foreground mb-2">语音输入</h3>
           <p className="text-[13px] text-muted-foreground leading-relaxed">
