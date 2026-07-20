@@ -52,6 +52,9 @@ func (h *RelayHandler) HandleChatCompletions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	// Thread an upstream conversation id (if any) so the free mimo-auto provider
+	// can derive a stable per-session X-Session-Affinity.
+	req.SessionID = c.GetHeader("X-Session-Id")
 
 	// Try to find a channel first
 	channel, err := h.channelRepo.GetBestChannel(req.Model)

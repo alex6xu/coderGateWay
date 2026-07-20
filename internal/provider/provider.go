@@ -37,6 +37,10 @@ type ChatCompletionRequest struct {
 	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
 	// EnablePromptCache hints providers that support explicit cache markers (e.g. Anthropic).
 	EnablePromptCache bool `json:"-"`
+	// SessionID carries an upstream conversation identifier (from the X-Session-Id
+	// header) used to derive a stable per-session X-Session-Affinity for the free
+	// mimo-auto endpoint. Not serialized to the upstream request body.
+	SessionID string `json:"-"`
 }
 
 // StreamOptions controls streaming extras (OpenAI-compatible).

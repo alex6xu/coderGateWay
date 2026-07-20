@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,7 +29,14 @@ const (
 	mimoFreeChatPath    = "/api/free-ai/openai/chat"
 	mimoFreeModel       = "mimo-auto"
 	mimoFreeTokenSkew   = 5 * time.Minute
-	mimoFreeUserAgent   = "mimocode/0.1.5"
+	// mimoFreeUserAgent is pinned to the exact UA observed in the official
+	// mimo-code client request log; do NOT change it dynamically.
+	mimoFreeUserAgent = "mimocode/local ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+	// mimoFreeMinInterval throttles per-instance request cadence to avoid the
+	// free endpoint's "high-frequency" (441) risk_control gate.
+	mimoFreeMinInterval = 600 * time.Millisecond
+	mimoFreeMaxRetries  = 5
 )
 
 // MiMoCodeSystemMarker is required by the free mimo-auto endpoint anti-abuse gate.
@@ -39,8 +47,10 @@ type MiMoFreeProvider struct {
 	config *ProviderConfig
 	client *http.Client
 
-	mu    sync.Mutex
-	token *mimoFreeToken
+	mu       sync.Mutex
+	token    *mimoFreeToken
+	lastCall time.Time // throttle: timestamp of the last chat call
+	affinity string    // instance-level fallback X-Session-Affinity value
 }
 
 type mimoFreeToken struct {
@@ -51,8 +61,9 @@ type mimoFreeToken struct {
 // NewMiMoFreeProvider creates a new MiMo free provider.
 func NewMiMoFreeProvider(config *ProviderConfig) *MiMoFreeProvider {
 	return &MiMoFreeProvider{
-		config: config,
-		client: &http.Client{Timeout: 180 * time.Second},
+		config:   config,
+		client:   &http.Client{Timeout: 180 * time.Second},
+		affinity: generateSessionAffinity(),
 	}
 }
 
@@ -270,29 +281,58 @@ func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionReques
 	if err != nil {
 		return nil, err
 	}
+	affinity := p.affinityFor(req)
 
 	jwt, err := p.getJWT(ctx, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mimo-auto token: %w", err)
 	}
 
-	resp, err := p.sendChat(ctx, body, jwt)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+	for attempt := 0; attempt < mimoFreeMaxRetries; attempt++ {
+		if attempt > 0 {
+			// refresh token on retries (covers both auth expiry and risk_control)
+			if jwt, err = p.getJWT(ctx, true); err != nil {
+				return nil, fmt.Errorf("failed to refresh mimo-auto token: %w", err)
+			}
+		}
+
+		p.throttle()
+		resp, err := p.sendChat(ctx, body, jwt, affinity)
+		if err != nil {
+			return nil, err
+		}
+
+		// Auth failure: refresh token and retry immediately (no backoff).
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			continue
+		}
+
+		// Risk control / rate limit: exponential backoff then retry.
+		if isRiskControl(resp) {
+			if attempt == mimoFreeMaxRetries-1 {
+				return resp, nil // let caller surface the risk_control body
+			}
+			resp.Body.Close()
+			delay := time.Duration(1<<uint(attempt)) * time.Second
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+
 		return resp, nil
 	}
-	resp.Body.Close()
 
-	jwt, err = p.getJWT(ctx, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to refresh mimo-auto token: %w", err)
-	}
-	return p.sendChat(ctx, body, jwt)
+	return nil, fmt.Errorf("mimo-auto request rejected (risk_control/rate limit) after %d attempts", mimoFreeMaxRetries)
 }
 
-func (p *MiMoFreeProvider) sendChat(ctx context.Context, body []byte, jwt string) (*http.Response, error) {
+func (p *MiMoFreeProvider) sendChat(ctx context.Context, body []byte, jwt, affinity string) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -300,6 +340,9 @@ func (p *MiMoFreeProvider) sendChat(ctx context.Context, body []byte, jwt string
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+jwt)
 	httpReq.Header.Set("X-Mimo-Source", "mimocode-cli-free")
+	if affinity != "" {
+		httpReq.Header.Set("X-Session-Affinity", affinity)
+	}
 	httpReq.Header.Set("User-Agent", mimoFreeUserAgent)
 	if strings.Contains(string(body), `"stream":true`) {
 		httpReq.Header.Set("Accept", "text/event-stream")
