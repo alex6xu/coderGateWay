@@ -273,6 +273,62 @@ func injectMiMoCodeSystemMarker(messages []Message) []Message {
 	return out
 }
 
+// throttle enforces a minimum interval between chat calls to avoid the free
+// endpoint's "high-frequency" (441) risk_control gate.
+func (p *MiMoFreeProvider) throttle() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.lastCall.IsZero() {
+		if d := time.Since(p.lastCall); d < mimoFreeMinInterval {
+			time.Sleep(mimoFreeMinInterval - d)
+		}
+	}
+	p.lastCall = time.Now()
+}
+
+// isRiskControl reports whether the response is a rate-limit / risk-control rejection.
+// It preserves resp.Body by re-wrapping the read bytes so the caller can still read it.
+func isRiskControl(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	s := string(b)
+	return strings.Contains(s, "risk_control") || strings.Contains(s, `"441"`) || strings.Contains(s, `"429"`)
+}
+
+// generateSessionAffinity returns a random ses_<hex> value matching the official
+// client's X-Session-Affinity format.
+func generateSessionAffinity() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("ses_%d", time.Now().UnixNano())
+	}
+	return "ses_" + hex.EncodeToString(b)
+}
+
+// affinityFor derives a stable X-Session-Affinity value from the request's session id
+// when available, falling back to the instance-level random value.
+func (p *MiMoFreeProvider) affinityFor(req *ChatCompletionRequest) string {
+	key := req.SessionID
+	if key == "" {
+		key = req.PromptCacheKey
+	}
+	if key != "" {
+		sum := sha256.Sum256([]byte(key))
+		return "ses_" + hex.EncodeToString(sum[:12])
+	}
+	return p.affinity
+}
+
 func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionRequest, stream bool) (*http.Response, error) {
 	prepared := p.prepareRequest(req)
 	prepared.Stream = stream

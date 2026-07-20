@@ -130,7 +130,6 @@ const (
 	ChannelTypeOllama   = 5
 	ChannelTypeMiMo     = 6
 	ChannelTypeMiMoFree = 7
-	ChannelTypeMiMoCode = 8
 	ChannelTypeAgnes    = 9
 	ChannelTypeGLM      = 10
 	ChannelTypeCustom   = 99

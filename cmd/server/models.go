@@ -179,18 +179,6 @@ func modelsForChannel(ctx context.Context, ch *model.Channel) []string {
 	switch ch.Type {
 	case model.ChannelTypeMiMoFree:
 		return provider.MiMoFreeAdvertisedModels()
-	case model.ChannelTypeMiMoCode:
-		if ids := parseModelsJSON(ch.Models); len(ids) > 0 {
-			return ids
-		}
-		return []string{
-			"mimo/mimo-auto",
-			"mimo/mimo-v2.5-pro",
-			"mimo/mimo-v2.5",
-			"mimo-auto",
-			"mimo-v2.5-pro",
-			"mimo-v2.5",
-		}
 	}
 
 	if ids := parseModelsJSON(ch.Models); len(ids) > 0 {
@@ -268,7 +256,7 @@ func ownedByForChannelType(channelType int) string {
 		return "deepseek"
 	case model.ChannelTypeOllama:
 		return "ollama"
-	case model.ChannelTypeMiMo, model.ChannelTypeMiMoFree, model.ChannelTypeMiMoCode:
+	case model.ChannelTypeMiMo, model.ChannelTypeMiMoFree:
 		return "mimo"
 	case model.ChannelTypeAgnes:
 		return "agnes"

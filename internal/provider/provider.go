@@ -196,7 +196,6 @@ const (
 	ProviderTypeOllama   ProviderType = "ollama"
 	ProviderTypeMiMo     ProviderType = "mimo"
 	ProviderTypeMiMoFree ProviderType = "mimo-free"
-	ProviderTypeMiMoCode ProviderType = "mimocode"
 	ProviderTypeAgnes    ProviderType = "agnes"
 	ProviderTypeGLM      ProviderType = "glm"
 	ProviderTypeCustom   ProviderType = "custom"
@@ -242,8 +241,6 @@ func NewProvider(config *ProviderConfig) (Provider, error) {
 		return NewOpenAIProvider(config), nil
 	case ProviderTypeMiMoFree:
 		return NewMiMoFreeProvider(config), nil
-	case ProviderTypeMiMoCode:
-		return NewMiMoCodeProvider(config), nil
 	case ProviderTypeAgnes, ProviderTypeGLM:
 		return NewOpenAIProvider(config), nil
 	case ProviderTypeCustom:

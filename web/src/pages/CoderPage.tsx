@@ -497,16 +497,6 @@ export default function CoderPage() {
 
       if (!fullText) {
         applyAssistant({ content: 'No response' })
-      } else if (
-        fullText.includes('MiMoCode backend') ||
-        fullText.includes('create session failed')
-      ) {
-        applyAssistant({
-          content:
-            '⚠️ ' +
-            fullText +
-            '\n\n如需使用 MiMoCode 本地代理，请先启动：\n`mimo serve --hostname 127.0.0.1 --port 10001`\n默认免费通道（类型 7）无需本地服务，可直接调用 mimo-auto。',
-        })
       } else if (fullText.includes('no available channel')) {
         applyAssistant({
           content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
