@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // Provider represents an LLM provider interface
@@ -208,6 +209,32 @@ type ProviderConfig struct {
 	BaseURL string       `json:"base_url"`
 	APIKey  string       `json:"api_key"`
 	Models  []string     `json:"models"`
+}
+
+// Singleton provider cache: keyed by "type|base_url".
+// Ensures mimo-free requests share one MiMoFreeProvider instance so that
+// throttle/rate-limit state is global, not per-request.
+var (
+	singletonMu        sync.Mutex
+	singletonProviders = make(map[string]Provider)
+)
+
+// GetOrCreateSingleton returns a cached provider for the given config, creating
+// one if it does not yet exist. Use this for providers that carry per-instance
+// state (e.g. MiMoFreeProvider's throttle and fingerprint).
+func GetOrCreateSingleton(config *ProviderConfig) (Provider, error) {
+	key := string(config.Type) + "|" + config.BaseURL
+	singletonMu.Lock()
+	defer singletonMu.Unlock()
+	if p, ok := singletonProviders[key]; ok {
+		return p, nil
+	}
+	p, err := NewProvider(config)
+	if err != nil {
+		return nil, err
+	}
+	singletonProviders[key] = p
+	return p, nil
 }
 
 // Registry manages providers

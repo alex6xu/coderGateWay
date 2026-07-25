@@ -855,6 +855,12 @@ func createProviderFromChannel(channel *model.Channel) (provider.Provider, error
 	if providerCfg.BaseURL == "" {
 		providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
 	}
+	// Use singleton for mimo-free so that throttle/fingerprint state
+	// is preserved across requests (the global lock inside doChat also
+	// requires a single instance to work correctly).
+	if channel.Type == model.ChannelTypeMiMoFree {
+		return provider.GetOrCreateSingleton(providerCfg)
+	}
 	return provider.NewProvider(providerCfg)
 }
 

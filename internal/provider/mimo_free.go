@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"math/rand/v2"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,11 +34,20 @@ const (
 	// mimo-code client request log; do NOT change it dynamically.
 	mimoFreeUserAgent = "mimocode/local ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
-	// mimoFreeMinInterval throttles per-instance request cadence to avoid the
-	// free endpoint's "high-frequency" (441) risk_control gate.
-	mimoFreeMinInterval = 600 * time.Millisecond
+	// mimoFreeMinInterval is the base throttle interval between chat calls.
+	// Actual wait = mimoFreeMinInterval + rand(0..mimoFreeJitterRange).
+	mimoFreeMinInterval = 2 * time.Second
+	mimoFreeJitterRange = 3 * time.Second
 	mimoFreeMaxRetries  = 5
+	// mimoFreeRotateThreshold is the number of consecutive risk_control
+	// failures before the cached fingerprint is rotated.
+	mimoFreeRotateThreshold = 3
 )
+
+// mimoFreeGlobalLock serialises ALL mimo-free chat requests across the entire
+// process. Without this, concurrent goroutines bypass per-instance throttle
+// and trigger the server-side "high-frequency" (441) gate.
+var mimoFreeGlobalLock sync.Mutex
 
 // MiMoCodeSystemMarker is required by the free mimo-auto endpoint anti-abuse gate.
 const MiMoCodeSystemMarker = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks."
@@ -47,10 +57,11 @@ type MiMoFreeProvider struct {
 	config *ProviderConfig
 	client *http.Client
 
-	mu       sync.Mutex
-	token    *mimoFreeToken
-	lastCall time.Time // throttle: timestamp of the last chat call
-	affinity string    // instance-level fallback X-Session-Affinity value
+	mu              sync.Mutex
+	token           *mimoFreeToken
+	lastCall        time.Time // throttle: timestamp of the last chat call
+	affinity        string    // instance-level fallback X-Session-Affinity value
+	riskControlHits int       // consecutive risk_control failures
 }
 
 type mimoFreeToken struct {
@@ -148,7 +159,11 @@ func (p *MiMoFreeProvider) fingerprint() (string, error) {
 		username = u.Username
 	}
 
-	payload := strings.Join([]string{hostname, platform, arch, cpuModel, username}, "|")
+	// Include a random salt so re-generated fingerprints are unique even on
+	// the same machine, breaking server-side fingerprint-based bans.
+	salt := make([]byte, 8)
+	_, _ = crand.Read(salt)
+	payload := strings.Join([]string{hostname, platform, arch, cpuModel, username, hex.EncodeToString(salt)}, "|")
 	sum := sha256.Sum256([]byte(payload))
 	fp := hex.EncodeToString(sum[:])
 
@@ -273,17 +288,33 @@ func injectMiMoCodeSystemMarker(messages []Message) []Message {
 	return out
 }
 
-// throttle enforces a minimum interval between chat calls to avoid the free
-// endpoint's "high-frequency" (441) risk_control gate.
+// throttle enforces a minimum interval with random jitter between chat calls
+// to avoid the free endpoint's "high-frequency" (441) risk_control gate.
+// Actual wait = mimoFreeMinInterval + rand(0..mimoFreeJitterRange).
 func (p *MiMoFreeProvider) throttle() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.lastCall.IsZero() {
-		if d := time.Since(p.lastCall); d < mimoFreeMinInterval {
-			time.Sleep(mimoFreeMinInterval - d)
+		jitter := time.Duration(rand.Int64N(int64(mimoFreeJitterRange) + 1))
+		minWait := mimoFreeMinInterval + jitter
+		if d := time.Since(p.lastCall); d < minWait {
+			time.Sleep(minWait - d)
 		}
 	}
 	p.lastCall = time.Now()
+}
+
+// rotateFingerprint deletes the cached fingerprint and invalidates the JWT
+// token so the next bootstrap generates a fresh identity. Called after
+// mimoFreeRotateThreshold consecutive risk_control failures.
+func (p *MiMoFreeProvider) rotateFingerprint() {
+	path := p.fingerprintPath()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("[mimo-free] failed to remove fingerprint: %v", err)
+	}
+	p.token = nil
+	p.riskControlHits = 0
+	log.Printf("[mimo-free] rotated fingerprint — next bootstrap will generate a new identity")
 }
 
 // isRiskControl reports whether the response is a rate-limit / risk-control rejection.
@@ -309,7 +340,7 @@ func isRiskControl(resp *http.Response) bool {
 // client's X-Session-Affinity format.
 func generateSessionAffinity() string {
 	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := crand.Read(b); err != nil {
 		return fmt.Sprintf("ses_%d", time.Now().UnixNano())
 	}
 	return "ses_" + hex.EncodeToString(b)
@@ -330,6 +361,10 @@ func (p *MiMoFreeProvider) affinityFor(req *ChatCompletionRequest) string {
 }
 
 func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionRequest, stream bool) (*http.Response, error) {
+	// Global serialisation: only one mimo-free request in-flight at a time.
+	mimoFreeGlobalLock.Lock()
+	defer mimoFreeGlobalLock.Unlock()
+
 	prepared := p.prepareRequest(req)
 	prepared.Stream = stream
 
@@ -364,16 +399,24 @@ func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionReques
 			continue
 		}
 
-		// Risk control / rate limit: exponential backoff then retry.
+		// Risk control / rate limit: exponential backoff with jitter, then retry.
 		if isRiskControl(resp) {
+			p.riskControlHits++
 			if attempt == mimoFreeMaxRetries-1 {
+				// Rotate fingerprint after repeated failures.
+				if p.riskControlHits >= mimoFreeRotateThreshold {
+					p.rotateFingerprint()
+				}
 				return resp, nil // let caller surface the risk_control body
 			}
 			resp.Body.Close()
-			delay := time.Duration(1<<uint(attempt)) * time.Second
-			if delay > 30*time.Second {
-				delay = 30 * time.Second
+			baseDelay := time.Duration(1<<uint(attempt)) * time.Second
+			if baseDelay > 30*time.Second {
+				baseDelay = 30 * time.Second
 			}
+			jitter := time.Duration(rand.Int64N(int64(baseDelay/2) + 1))
+			delay := baseDelay + jitter
+			log.Printf("[mimo-free] risk_control hit=%d attempt=%d backoff=%v", p.riskControlHits, attempt, delay)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -382,6 +425,8 @@ func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionReques
 			continue
 		}
 
+		// Success: reset risk_control counter.
+		p.riskControlHits = 0
 		return resp, nil
 	}
 
