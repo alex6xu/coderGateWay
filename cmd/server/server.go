@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -60,6 +61,17 @@ func Run() error {
 
 	// Initialize default channels for the default account
 	initDefaultChannels(database, cfg, defaultAccount.ID)
+	taskWorker := newAgentTaskWorker(database, workspaceMgr, cfg)
+	if _, err := taskWorker.RecoverInterrupted(); err != nil {
+		return fmt.Errorf("failed to recover interrupted agent tasks: %w", err)
+	}
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	defer cancelWorker()
+	go func() {
+		if err := taskWorker.Run(workerCtx); err != nil && workerCtx.Err() == nil {
+			log.Printf("Agent Task worker stopped: %v", err)
+		}
+	}()
 
 	// Setup Gin router
 	r := gin.Default()
@@ -153,6 +165,9 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			agent := protected.Group("/agent")
 			{
 				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc))
+				agent.POST("/tasks", handleCreateAgentTask(database))
+				agent.GET("/tasks", handleListAgentTasks(database))
+				agent.GET("/tasks/:id", handleGetAgentTask(database))
 				agent.GET("/sessions", handleListSessions(database))
 				agent.POST("/sessions/import/preview", handleImportMDPreview())
 				agent.POST("/sessions/import", handleImportMDSession(database, tagSvc))
@@ -211,6 +226,12 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 
 				admin.GET("/tokens", handleListTokens(database))
 				admin.POST("/tokens", handleCreateToken(database))
+
+				admin.GET("/route-profiles", handleListRouteProfiles(database))
+				admin.POST("/route-profiles", handleCreateRouteProfile(database))
+				admin.PUT("/route-profiles/:id", handleUpdateRouteProfile(database))
+				admin.DELETE("/route-profiles/:id", handleDeleteRouteProfile(database))
+
 			}
 		}
 	}

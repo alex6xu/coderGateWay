@@ -9,6 +9,7 @@ const baseNavigation = [
   { name: 'Channels', href: '/channels', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
   { name: 'Tags', href: '/tags', icon: '🏷️' },
+  { name: 'Agent Tasks', href: '/agent-tasks', icon: '🤖' },
   { name: 'Accounts', href: '/accounts', icon: '👤', adminOnly: true },
   { name: 'Settings', href: '/settings', icon: '⚙️' },
 ]

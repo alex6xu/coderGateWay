@@ -192,6 +192,41 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 CREATE INDEX IF NOT EXISTS idx_workspaces_user_id ON workspaces(user_id);
 
+-- Ordered, tenant-scoped model candidates used by the cloud gateway.
+CREATE TABLE IF NOT EXISTS route_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    models TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(user_id, name),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_route_profiles_user_id ON route_profiles(user_id);
+
+-- Durable task records for cloud workspace coding and documentation runs.
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL,
+    route_profile_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT "",
+    error TEXT NOT NULL DEFAULT "",
+    tool_steps TEXT NOT NULL DEFAULT "[]",
+    created_at DATETIME NOT NULL,
+    started_at DATETIME,
+    finished_at DATETIME,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+    FOREIGN KEY (route_profile_id) REFERENCES route_profiles(id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_user_created ON agent_tasks(user_id, created_at DESC);
+
 -- GitHub OAuth connections (one per account)
 CREATE TABLE IF NOT EXISTS github_connections (
     user_id INTEGER PRIMARY KEY,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
+	"github.com/alex/codegateway/internal/gateway/profile"
 	"github.com/alex/codegateway/internal/model"
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/agent/memory"
@@ -250,30 +252,27 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			return
 		}
 
-		// Find a channel that supports this model (scoped to account)
-		channel, err := findChannelForModel(database, accountID, req.Model)
+		candidates, err := resolveChatCompletionCandidates(database, accountID, req.Model)
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel for model: " + req.Model})
 			return
 		}
 
-		req.Model = resolveModelForChannel(channel, req.Model)
-		log.Printf("[chat] account=%d model=%s channel=%s(type=%d) stream=%v", accountID, req.Model, channel.Name, channel.Type, req.Stream)
-
-		prov, err := createProviderFromChannel(channel)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
 		// Handle streaming
 		if req.Stream {
+			selected := firstStreamCandidate(candidates)
+			req.Model = selected.model
+			log.Printf("[chat] account=%d model=%s channel=%s(type=%d) stream=true", accountID, req.Model, selected.channel.Name, selected.channel.Type)
+			prov, err := createProviderFromChannel(selected.channel)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 			handleStreamResponse(c, prov, &req)
 			return
 		}
 
-		// Non-streaming response
-		resp, err := prov.ChatCompletion(c.Request.Context(), &req)
+		resp, selected, err := completeWithCandidates(c.Request.Context(), candidates, &req, createProviderFromChannel)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -281,10 +280,79 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 		resp.Usage.Normalize()
 
 		// Log usage
-		logUsage(database, accountID, channel, req.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
+		logUsage(database, accountID, selected.channel, selected.model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
 
 		c.JSON(http.StatusOK, resp)
 	}
+}
+
+// firstStreamCandidate deliberately selects one candidate only: a streaming
+// response is never retried after it can have written response data.
+func firstStreamCandidate(candidates []chatCompletionCandidate) chatCompletionCandidate {
+	return candidates[0]
+}
+
+type chatCompletionCandidate struct {
+	model   string
+	channel *model.Channel
+}
+
+// resolveChatCompletionCandidates expands an owned Route Profile to enabled,
+// account-owned channels. A direct model request preserves the existing
+// single-channel behavior.
+func resolveChatCompletionCandidates(database *db.DB, accountID int64, requestedModel string) ([]chatCompletionCandidate, error) {
+	requestedModels := []string{requestedModel}
+	selected, err := routeProfileStore(database).GetByName(accountID, requestedModel)
+	if err == nil {
+		requestedModels = selected.Models
+	} else if !errors.Is(err, profile.ErrNotFound) {
+		return nil, err
+	}
+
+	return resolveModelCandidates(database, accountID, requestedModel, requestedModels)
+}
+
+// resolveModelCandidates applies the enabled, account-owned channel selection
+// rules shared by synchronous gateway completions and cloud Agent Tasks.
+func resolveModelCandidates(database *db.DB, accountID int64, requestedName string, requestedModels []string) ([]chatCompletionCandidate, error) {
+	candidates := make([]chatCompletionCandidate, 0, len(requestedModels))
+	for _, requested := range requestedModels {
+		channel, err := findChannelForModel(database, accountID, requested)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, chatCompletionCandidate{
+			model:   resolveModelForChannel(channel, requested),
+			channel: channel,
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no channel found for model: %s", requestedName)
+	}
+	return candidates, nil
+}
+
+// completeWithCandidates retries only profile candidates, which is naturally
+// one attempt for direct model requests returned by the resolver.
+func completeWithCandidates(ctx context.Context, candidates []chatCompletionCandidate, request *provider.ChatCompletionRequest, newProvider func(*model.Channel) (provider.Provider, error)) (*provider.ChatCompletionResponse, chatCompletionCandidate, error) {
+	var lastErr error
+	for _, candidate := range candidates {
+		prov, err := newProvider(candidate.channel)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		attempt := *request
+		attempt.Model = candidate.model
+		resp, err := prov.ChatCompletion(ctx, &attempt)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Model = candidate.model
+		return resp, candidate, nil
+	}
+	return nil, chatCompletionCandidate{}, lastErr
 }
 
 func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.ChatCompletionRequest) {

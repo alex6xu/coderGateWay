@@ -10,6 +10,7 @@ import SessionsPage from './pages/SessionsPage'
 import TagsPage from './pages/TagsPage'
 import SettingsPage from './pages/SettingsPage'
 import AccountsPage from './pages/AccountsPage'
+import AgentTasksPage from './pages/AgentTasksPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 
@@ -39,6 +40,7 @@ function ProtectedApp() {
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="tags" element={<TagsPage />} />
+          <Route path="agent-tasks" element={<AgentTasksPage />} />
           <Route
             path="accounts"
             element={isAdmin ? <AccountsPage /> : <Navigate to="/" replace />}

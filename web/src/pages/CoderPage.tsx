@@ -168,7 +168,11 @@ export default function CoderPage() {
       const list: WorkspaceInfo[] = data.workspaces || []
       setWorkspaces(list)
       if (list.length > 0) {
-        setWorkspaceId((prev) => (prev && list.some((w) => w.id === prev) ? prev : list[0].id))
+        const requestedWorkspaceID = new URLSearchParams(window.location.search).get('workspace')
+        setWorkspaceId((prev) => {
+          if (requestedWorkspaceID && list.some((workspace) => workspace.id === requestedWorkspaceID)) return requestedWorkspaceID
+          return prev && list.some((workspace) => workspace.id === prev) ? prev : list[0].id
+        })
       } else {
         setWorkspaceId('')
       }
