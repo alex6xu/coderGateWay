@@ -15,7 +15,7 @@ redis:
   db: 0
 
 agent:
-  default_model: "mimo-auto"
+  default_model: ""
   max_iterations: 12
   # Completion / generation cap (not the full context window)
   max_tokens: 4096
@@ -55,15 +55,8 @@ gateway:
     fallback_enabled: true
     retry_count: 3
   
-  # 预置渠道
-  default_channels:
-    - name: "MiMo Free"
-      type: 7
-      base_url: "https://api.xiaomimimo.com"
-      key: ""
-      models: ""
-      weight: 10
-      priority: 100
+  # 预置渠道（启动时自动为 admin 账号创建，留空则不预置）
+  default_channels: []
 
 platforms:
   telegram:

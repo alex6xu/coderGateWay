@@ -2,50 +2,34 @@ package provider
 
 import (
 	"context"
-	"fmt"
 )
 
-// CustomProvider implements the Provider interface for custom endpoints
+// CustomProvider implements the Provider interface for custom OpenAI-compatible endpoints.
 type CustomProvider struct {
-	config *ProviderConfig
+	delegate *OpenAIProvider
 }
 
-// NewCustomProvider creates a new custom provider
+// NewCustomProvider creates a new custom provider backed by the OpenAI adapter.
 func NewCustomProvider(config *ProviderConfig) *CustomProvider {
-	return &CustomProvider{config: config}
+	return &CustomProvider{delegate: NewOpenAIProvider(config)}
 }
 
-// Name returns the provider name
 func (p *CustomProvider) Name() string {
-	return p.config.Name
+	return p.delegate.Name()
 }
 
-// ChatCompletion sends a chat completion request
 func (p *CustomProvider) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	// TODO: Implement custom API (OpenAI compatible)
-	return nil, fmt.Errorf("custom provider not implemented yet")
+	return p.delegate.ChatCompletion(ctx, req)
 }
 
-// ChatCompletionStream sends a streaming chat completion request
 func (p *CustomProvider) ChatCompletionStream(ctx context.Context, req *ChatCompletionRequest) (<-chan *ChatCompletionChunk, error) {
-	// TODO: Implement custom streaming API
-	return nil, fmt.Errorf("custom provider not implemented yet")
+	return p.delegate.ChatCompletionStream(ctx, req)
 }
 
-// ListModels returns available models
 func (p *CustomProvider) ListModels(ctx context.Context) ([]string, error) {
-	return p.config.Models, nil
+	return p.delegate.ListModels(ctx)
 }
 
-// ValidateModel checks if a model is available
 func (p *CustomProvider) ValidateModel(model string) bool {
-	if len(p.config.Models) == 0 {
-		return true
-	}
-	for _, m := range p.config.Models {
-		if m == model {
-			return true
-		}
-	}
-	return false
+	return p.delegate.ValidateModel(model)
 }

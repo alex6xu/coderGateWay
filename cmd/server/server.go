@@ -208,6 +208,8 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				admin.POST("/channels", handleCreateChannel(database))
 				admin.PUT("/channels/:id", handleUpdateChannel(database))
 				admin.DELETE("/channels/:id", handleDeleteChannel(database))
+				admin.PUT("/channels/:id/set-default", handleSetDefaultChannel(database))
+				admin.POST("/channels/:id/fetch-models", handleFetchChannelModels(database))
 
 				admin.GET("/accounts/current", handleGetCurrentAccount(accountMgr))
 

@@ -159,11 +159,10 @@ func (p *MiMoFreeProvider) fingerprint() (string, error) {
 		username = u.Username
 	}
 
-	// Include a random salt so re-generated fingerprints are unique even on
-	// the same machine, breaking server-side fingerprint-based bans.
-	salt := make([]byte, 8)
-	_, _ = crand.Read(salt)
-	payload := strings.Join([]string{hostname, platform, arch, cpuModel, username, hex.EncodeToString(salt)}, "|")
+	// Generate deterministic fingerprint matching the official MiMoCode client.
+	// No random salt — the official client uses the same fingerprint for the
+	// same machine. Rotation works by deleting the file and regenerating.
+	payload := strings.Join([]string{hostname, platform, arch, cpuModel, username}, "|")
 	sum := sha256.Sum256([]byte(payload))
 	fp := hex.EncodeToString(sum[:])
 
@@ -399,30 +398,16 @@ func (p *MiMoFreeProvider) doChat(ctx context.Context, req *ChatCompletionReques
 			continue
 		}
 
-		// Risk control / rate limit: exponential backoff with jitter, then retry.
+		// Risk control / rate limit: do NOT retry — the official MiMoCode
+		// client does not retry on 441, and retrying triggers the server's
+		// "high-frequency" detection again, making the problem worse.
 		if isRiskControl(resp) {
 			p.riskControlHits++
-			if attempt == mimoFreeMaxRetries-1 {
-				// Rotate fingerprint after repeated failures.
-				if p.riskControlHits >= mimoFreeRotateThreshold {
-					p.rotateFingerprint()
-				}
-				return resp, nil // let caller surface the risk_control body
+			log.Printf("[mimo-free] risk_control hit=%d (no retry, matching official client behavior)", p.riskControlHits)
+			if p.riskControlHits >= mimoFreeRotateThreshold {
+				p.rotateFingerprint()
 			}
-			resp.Body.Close()
-			baseDelay := time.Duration(1<<uint(attempt)) * time.Second
-			if baseDelay > 30*time.Second {
-				baseDelay = 30 * time.Second
-			}
-			jitter := time.Duration(rand.Int64N(int64(baseDelay/2) + 1))
-			delay := baseDelay + jitter
-			log.Printf("[mimo-free] risk_control hit=%d attempt=%d backoff=%v", p.riskControlHits, attempt, delay)
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			continue
+			return resp, nil // let caller surface the risk_control body
 		}
 
 		// Success: reset risk_control counter.
@@ -449,6 +434,8 @@ func (p *MiMoFreeProvider) sendChat(ctx context.Context, body []byte, jwt, affin
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 	log.Printf("[mimo-free] chat request url=%s stream=%v", p.chatURL(), strings.Contains(string(body), `"stream":true`))
+	log.Printf("[mimo-free] request body: %s", string(body))
+	log.Printf("[mimo-free] request headers: Authorization=Bearer %s..., X-Mimo-Source=%s, User-Agent=%s", jwt[:20], httpReq.Header.Get("X-Mimo-Source"), httpReq.Header.Get("User-Agent"))
 	return p.client.Do(httpReq)
 }
 

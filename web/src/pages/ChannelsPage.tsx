@@ -11,6 +11,7 @@ interface Channel {
   status: number
   weight: number
   priority: number
+  is_default: number
 }
 
 export default function ChannelsPage() {
@@ -26,6 +27,7 @@ export default function ChannelsPage() {
     models: '',
     weight: 1,
     priority: 0,
+    is_default: 0,
   })
 
   useEffect(() => {
@@ -76,6 +78,7 @@ export default function ChannelsPage() {
       models: channel.models,
       weight: channel.weight,
       priority: channel.priority,
+      is_default: channel.is_default,
     })
     setEditingId(channel.id)
     setShowAdd(true)
@@ -92,6 +95,34 @@ export default function ChannelsPage() {
     }
   }
 
+  const handleSetDefault = async (id: number) => {
+    try {
+      await apiFetch(`/v1/admin/channels/${id}/set-default`, { method: 'PUT' }, currentAccount?.id)
+      fetchChannels()
+    } catch (error) {
+      console.error('Failed to set default channel:', error)
+    }
+  }
+
+  const [fetchingModels, setFetchingModels] = useState(false)
+
+  const handleFetchModels = async () => {
+    if (!editingId) return
+    setFetchingModels(true)
+    try {
+      const response = await apiFetch(`/v1/admin/channels/${editingId}/fetch-models`, { method: 'POST' }, currentAccount?.id)
+      if (response.ok) {
+        const data = await response.json()
+        const modelStr = (data.models || []).join(', ')
+        setForm(prev => ({ ...prev, models: modelStr }))
+      }
+    } catch (error) {
+      console.error('Failed to fetch models:', error)
+    } finally {
+      setFetchingModels(false)
+    }
+  }
+
   const resetForm = () => {
     setForm({
       name: '',
@@ -101,6 +132,7 @@ export default function ChannelsPage() {
       models: '',
       weight: 1,
       priority: 0,
+      is_default: 0,
     })
   }
 
@@ -220,13 +252,38 @@ export default function ChannelsPage() {
 
               <div>
                 <label className="block text-[13px] font-medium text-foreground mb-1.5">Models (comma separated, empty for all)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={form.models}
+                    onChange={(e) => setForm({...form, models: e.target.value})}
+                    placeholder="gpt-4o, gpt-3.5-turbo"
+                    className="flex-1 h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  {editingId && (
+                    <button
+                      type="button"
+                      onClick={handleFetchModels}
+                      disabled={fetchingModels}
+                      className="h-9 px-3 text-[12px] text-primary border border-primary/30 rounded-lg hover:bg-primary/10 disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      {fetchingModels ? '...' : 'Fetch Models'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
                 <input
-                  type="text"
-                  value={form.models}
-                  onChange={(e) => setForm({...form, models: e.target.value})}
-                  placeholder="gpt-4o, gpt-3.5-turbo"
-                  className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  type="checkbox"
+                  id="is_default"
+                  checked={form.is_default === 1}
+                  onChange={(e) => setForm({...form, is_default: e.target.checked ? 1 : 0})}
+                  className="w-4 h-4 rounded border-border"
                 />
+                <label htmlFor="is_default" className="text-[13px] font-medium text-foreground">
+                  Set as default channel
+                </label>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -280,13 +337,14 @@ export default function ChannelsPage() {
               <th className="px-4 py-3 text-left text-[12px] font-medium text-muted-foreground">Type</th>
               <th className="px-4 py-3 text-left text-[12px] font-medium text-muted-foreground">Base URL</th>
               <th className="px-4 py-3 text-left text-[12px] font-medium text-muted-foreground">Status</th>
+              <th className="px-4 py-3 text-left text-[12px] font-medium text-muted-foreground">Default</th>
               <th className="px-4 py-3 text-left text-[12px] font-medium text-muted-foreground">Actions</th>
             </tr>
           </thead>
           <tbody>
             {channels.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-12 text-center">
+                <td colSpan={7} className="px-4 py-12 text-center">
                   <div className="flex flex-col items-center">
                     <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center mb-3">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#71717a" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -321,6 +379,23 @@ export default function ChannelsPage() {
                         }`}></span>
                         {channel.status === 1 ? 'Active' : 'Inactive'}
                       </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      {channel.is_default === 1 ? (
+                        <span className="inline-flex items-center gap-1 text-[12px] font-medium text-yellow-400">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26" />
+                          </svg>
+                          Default
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleSetDefault(channel.id)}
+                          className="text-[12px] text-muted-foreground hover:text-yellow-400 transition-colors"
+                        >
+                          Set
+                        </button>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">

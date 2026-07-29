@@ -309,6 +309,10 @@ func Migrate(db *DB) error {
 		return err
 	}
 
+	if err := ensureChannelDefaultColumn(db); err != nil {
+		return err
+	}
+
 	log.Println("Database migrations completed")
 	return nil
 }
@@ -333,6 +337,21 @@ func ensureWorkspaceGitColumns(db *DB) error {
 		if _, err := db.Exec(col.ddl); err != nil {
 			return fmt.Errorf("failed to add workspaces.%s: %w", col.name, err)
 		}
+	}
+	return nil
+}
+
+func ensureChannelDefaultColumn(db *DB) error {
+	has, err := tableHasColumn(db, "channels", "is_default")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	log.Println("Migrating channels: adding is_default")
+	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN is_default INTEGER DEFAULT 0"); err != nil {
+		return fmt.Errorf("failed to add channels.is_default: %w", err)
 	}
 	return nil
 }

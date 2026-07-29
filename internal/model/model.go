@@ -44,6 +44,7 @@ type Channel struct {
 	UsedQuota    int64     `json:"used_quota"`
 	ModelMapping string    `json:"model_mapping"`
 	Groups       string    `json:"groups"`
+	IsDefault    int       `json:"is_default"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

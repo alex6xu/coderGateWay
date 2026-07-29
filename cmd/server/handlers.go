@@ -36,7 +36,7 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 		}
 
 		rows, err := database.Query(`
-			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, created_at, updated_at 
+			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, is_default, created_at, updated_at
 			FROM channels WHERE user_id = ? ORDER BY id DESC
 		`, accountID)
 		if err != nil {
@@ -48,7 +48,7 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 		channels := make([]model.Channel, 0)
 		for rows.Next() {
 			var ch model.Channel
-			err := rows.Scan(&ch.ID, &ch.UserID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.CreatedAt, &ch.UpdatedAt)
+			err := rows.Scan(&ch.ID, &ch.UserID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.IsDefault, &ch.CreatedAt, &ch.UpdatedAt)
 			if err != nil {
 				continue
 			}
@@ -143,6 +143,7 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 			Status       *int    `json:"status"`
 			ModelMapping *string `json:"model_mapping"`
 			Groups       *string `json:"groups"`
+			IsDefault    *int    `json:"is_default"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -194,6 +195,10 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 			query += ", groups = ?"
 			args = append(args, *req.Groups)
 		}
+		if req.IsDefault != nil {
+			query += ", is_default = ?"
+			args = append(args, *req.IsDefault)
+		}
 
 		query += " WHERE id = ? AND user_id = ?"
 		args = append(args, channelID, accountID)
@@ -234,6 +239,75 @@ func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusOK, gin.H{"message": "channel deleted"})
+	}
+}
+
+func handleSetDefaultChannel(database *db.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		id := c.Param("id")
+		channelID, err := strconv.ParseInt(id, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel id"})
+			return
+		}
+
+		if !channelOwnedBy(database, channelID, accountID) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
+
+		// Clear all defaults for this account
+		if _, err := database.Exec("UPDATE channels SET is_default = 0 WHERE user_id = ?", accountID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear defaults"})
+			return
+		}
+
+		// Set this channel as default
+		if _, err := database.Exec("UPDATE channels SET is_default = 1 WHERE id = ? AND user_id = ?", channelID, accountID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to set default"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "default channel set"})
+	}
+}
+
+func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		id := c.Param("id")
+		channelID, err := strconv.ParseInt(id, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel id"})
+			return
+		}
+
+		if !channelOwnedBy(database, channelID, accountID) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
+
+		var ch model.Channel
+		err = database.QueryRow(`
+			SELECT id, name, type, key, base_url, models, weight, priority, status
+			FROM channels WHERE id = ? AND user_id = ?
+		`, channelID, accountID).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
+
+		models := modelsForChannel(c.Request.Context(), &ch)
+		c.JSON(http.StatusOK, gin.H{"models": models})
 	}
 }
 
@@ -450,8 +524,12 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		if req.Model != "" {
 			modelName = req.Model
 		}
-		channel, err := findChannelForModel(database, accountID, modelName)
-		if err != nil {
+		var channel *model.Channel
+		var err error
+		if modelName != "" {
+			channel, err = findChannelForModel(database, accountID, modelName)
+		}
+		if channel == nil || err != nil {
 			channel, err = findAnyChannel(database, accountID)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel"})
@@ -880,20 +958,24 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 			continue
 		}
 
-		var models []string
-		if json.Unmarshal([]byte(ch.Models), &models) == nil {
-			for _, m := range models {
-				if m == modelName || provider.NormalizeModelAlias(m) == normalizedRequest {
-					chCopy := ch
-					matches = append(matches, &chCopy)
-					break
-				}
+		for _, m := range parseModelsJSON(ch.Models) {
+			if m == modelName || provider.NormalizeModelAlias(m) == normalizedRequest {
+				chCopy := ch
+				matches = append(matches, &chCopy)
+				break
 			}
 		}
 	}
 
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("no channel found for model: %s", modelName)
+	}
+
+	// Explicit default channel always wins — even over MiMo special routing
+	for _, ch := range matches {
+		if ch.IsDefault == 1 {
+			return ch, nil
+		}
 	}
 
 	if normalizedRequest == "mimo-auto" || normalizedRequest == "mimo-free" || strings.HasPrefix(normalizedRequest, "mimo-") {
@@ -936,6 +1018,11 @@ func resolveModelForChannel(channel *model.Channel, modelName string) string {
 	if channel.Type == model.ChannelTypeMiMoFree {
 		return provider.NormalizeModelForMiMoAuto(modelName)
 	}
+	if modelName == "" {
+		if models := parseModelsJSON(channel.Models); len(models) > 0 {
+			return models[0]
+		}
+	}
 	return modelName
 }
 
@@ -973,7 +1060,7 @@ func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
 	var ch model.Channel
 	err := database.QueryRow(`
 		SELECT id, name, type, key, base_url, models, weight, priority, status
-		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC LIMIT 1
+		FROM channels WHERE status = 1 AND user_id = ? ORDER BY is_default DESC, priority DESC, weight DESC LIMIT 1
 	`, accountID).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
 
 	if err != nil {
@@ -1096,8 +1183,12 @@ func handleCreateToken(database *db.DB) gin.HandlerFunc {
 
 func processMessage(database *db.DB, cfg *config.Config, sessionID string, message string, accountID int64, tagSvc *tags.Service) string {
 	modelName := cfg.Agent.DefaultModel
-	channel, err := findChannelForModel(database, accountID, modelName)
-	if err != nil {
+	var channel *model.Channel
+	var err error
+	if modelName != "" {
+		channel, err = findChannelForModel(database, accountID, modelName)
+	}
+	if channel == nil || err != nil {
 		channel, err = findAnyChannel(database, accountID)
 		if err != nil {
 			return "Error: No available channel. Please add a channel first."
