@@ -60,7 +60,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, NewProviderError(resp.StatusCode, resp.Header, bodyBytes)
 	}
 
 	var result ChatCompletionResponse
@@ -103,7 +103,7 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		return nil, NewProviderError(resp.StatusCode, resp.Header, bodyBytes)
 	}
 
 	chunks := make(chan *ChatCompletionChunk, 100)

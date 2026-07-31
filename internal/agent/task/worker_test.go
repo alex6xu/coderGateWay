@@ -92,6 +92,13 @@ func TestWorkerFailsTaskWhenOwnedWorkspaceCannotBeLoaded(t *testing.T) {
 		WorkspaceForTask: func(int64, string) (*workspace.Workspace, error) {
 			return nil, errors.New("workspace not found; api_key=secret-value")
 		},
+		ProviderForTask: func(*Task) (provider.Provider, string, error) {
+			return fakeWorkerProvider{}, "gpt-5", nil
+		},
+		Run: func(context.Context, provider.Provider, string, string, string, *workspace.Workspace) (string, []map[string]string, error) {
+			t.Fatal("runner must not be reached when workspace load fails")
+			return "", nil, nil
+		},
 	})
 
 	processed, err := worker.ProcessNext(context.Background())

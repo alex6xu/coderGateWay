@@ -33,7 +33,7 @@ func (p *ClaudeProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(raw))
+		return nil, NewProviderError(resp.StatusCode, resp.Header, raw)
 	}
 
 	ch := make(chan *ChatCompletionChunk, 64)

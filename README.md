@@ -1,75 +1,154 @@
 # CodeGateway
 
-个人 Code Agent + API 网关平台
+> **个人云端 AI 操作系统** — 一处部署，随处使用。
+> **A personal, cloud-native AI operating system** — deploy once, use everywhere.
 
-## 项目简介
+集大模型网关、Coding Agent、对话知识库于一体。跑在你自己的云端服务上，桌面 / Web / 手机 / 终端多端接入，把你与 AI 的每一次对话都留存、分类、沉淀为可检索的长期记忆；在服务器上执行长程 coding 任务，边缘端随时查看进度。
 
-CodeGateway 融合了 MiMo-Code（Agent 能力）+ new-api/sub2api（网关能力）+ hermes-agent（消息平台集成）的架构精华，构建一个**企业内部可用的云端 Agent + API 网关平台**。
+A unified **LLM gateway + coding agent + conversation knowledge base**. Run it on your own cloud server, access it from desktop / web / mobile / terminal. Every conversation is persisted, classified, and distilled into searchable long-term memory. Long-running coding tasks execute on the server while you check progress from any edge device.
 
-## 核心功能
+---
 
-### API 网关
-- **多 Provider 支持**: OpenAI、Claude、Gemini、DeepSeek、Ollama、MiMo、Agnes、GLM（智谱）、自定义端点
-- **格式转换**: OpenAI ⇄ Claude ⇄ Gemini ⇄ DeepSeek
-- **智能路由**: 根据 prompt 内容自动选择最优 provider
-- **负载均衡**: 多渠道权重轮询
-- **Token 计费**: 精确的 token 级计费和配额管理
-- **反向代理**: 支持免费 API 端点代理
+## 目标愿景 / Vision
 
-### Coder Agent
-- **Agent 循环**: 基于 LLM 的智能对话
-- **Context 优化**: 滑动窗口历史 + FTS 记忆检索 + 会话摘要 checkpoint；Coder 工具结果自动压缩
-- **云端工作区**: Code 页选择本地目录上传到云端，Agent 在隔离目录中读写文件
-- **工具系统**: list/read/write/grep/search/bash（限制在工作区根目录）
-- **记忆系统**: FTS5 全文检索（会话/全局记忆）
-- **技能系统**: SKILL.md 格式的技能定义
-- **子 Agent**: Actor 模式的子任务调度
-- **任务树**: SQLite 持久化的任务管理
-- **定时任务**: Cron 表达式的定时调度
-- **自我进化**: 自动学习和改进
+CodeGateway 想解决的核心问题：**让"我和 AI 的关系"从一次性、碎片化、锁死在单个 App 里，变成持续、连贯、属于自己的资产。**
 
-### 多平台接入
-- **Web**: React + TypeScript 前端（含 Chat 与 Code 代码开发页）
-- **Telegram**: Bot API 集成
-- **终端**: TUI 界面
-- **微信**: 后续支持
+1. **一处部署，随处使用** — 单二进制 + SQLite，部署在云端，桌面 / Web / 手机 / 终端共享同一份状态。
+2. **全量对话资产化** — 每条消息落库，自动分类打标，构建可检索的个人知识库。
+3. **云端长程任务** — 复杂 coding / 研究任务提交到服务器异步执行，关机也不中断，边缘端轮询进度。
+4. **三级记忆协调** — 妥善处理**短期记忆**（当前对话窗口）、**长期记忆**（跨会话 FTS 检索）、**大模型 context**（有限窗口预算）三者的关系。
+5. **定时自主整理** — 定时任务在后台归纳、摘要、重组内容，让记忆越用越有序。
 
-## 技术栈
+> 这是一份**愿景 + 现状**文档。下方的能力矩阵如实标注了每项功能的成熟度（✅ 已可用 / 🚧 进行中 / 📋 规划中），不夸大已完成的部分。
+
+---
+
+## 能力矩阵 / Capability Matrix
+
+图例：✅ 已可用（wired & working）· 🚧 进行中（partial / stub）· 📋 规划中（planned）
+
+### API 网关 / Gateway
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| OpenAI 兼容 relay (`/v1/chat/completions`) | ✅ | 端到端可用，含流式 |
+| 多 Provider | ✅ | OpenAI · Claude · DeepSeek · Ollama · MiMo · GLM · Agnes · Custom |
+| 路由 failover（多渠道自动切换） | ✅ | route-profile 失败切换（见 `docs/multi-channel-failover-routing.md`） |
+| 多账号隔离 | ✅ | channel / session 按 `user_id` 隔离，有测试覆盖 |
+| Gemini Provider | 🚧 | 仅 ListModels，`ChatCompletion` 未实现 |
+| Claude / Gemini 原生 endpoint | 🚧 | `handleClaudeMessages` / `handleGemini` 为 501 stub |
+| 格式转换（响应侧） | 🚧 | `ConvertResponse` 为 TODO stub，未接入请求路径 |
+| Token 计费 / 配额扣减 | 🚧 | 计费数学存在，但**未在请求路径强制执行**；仅记录 usage |
+
+### Coding Agent
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| Agent 循环（LLM + 工具循环） | ✅ | `cmd/server/coder_agent.go`，最多 N 轮，检测并执行工具调用 |
+| 工具系统（chroot 沙箱） | ✅ | `bash · read_file · write_file · list_directory · search_files · grep`，限制在工作区根目录 |
+| 云端工作区 | ✅ | Code 页上传本地目录到云端，Agent 在隔离目录读写 |
+| 后台长程任务 | ✅ | 任务 worker + REST 提交/轮询（`POST /v1/agent/tasks`、`GET .../:id`），重启可恢复 |
+| 并行只读工具 · prompt 缓存 · 流式事件 | ✅ | agent 循环内置 |
+| `edit` / `apply_patch` 增量编辑 | 📋 | 目前 write 为整文件覆盖 |
+| 子 Agent（Actor 模式） | 📋 | `internal/agent/actor/` 已有骨架但**零调用者**，未接入 |
+
+### 记忆与知识库 / Memory & Knowledge Base
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 全量对话存储 | ✅ | 每条消息落库（`messages` 表），角色标记 |
+| FTS5 全文记忆 | ✅ | session / project / global 三层，bm25 排序检索 |
+| Context 构建器 | ✅ | 滑动窗口（turn 上限）+ token 预算截断 + checkpoint 注入 |
+| 会话 checkpoint | ✅ | 每 N 轮生成，带 cutoff 标记 |
+| 对话分类打标 | ✅ | `question_tags` / `message_tags`，**关键词/正则**分类 |
+| LLM 摘要（非截断折叠） | 🚧 | 当前折叠为**截断式**（拼接消息行），非 LLM 摘要 |
+| 短期/长期记忆显式分层 | 🚧 | 目前靠 `type='checkpoint'` 隐式区分，无显式冷热分层 |
+| 定时自主整理 | 📋 | Cron 调度器 `calculateNextRun` 为 stub 且未接入 |
+
+### 多端接入 / Multi-Client
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| Web（React + TS + Tailwind） | ✅ | Chat / Coder / Sessions / Tags / Tasks / Channels / Accounts 等页面 |
+| WebSocket 实时对话 | ✅ | `/ws`，流式 chat |
+| 跨端查看任务进度 | ✅ | 任一客户端提交的任务可被任意认证客户端轮询（DB 共享状态） |
+| 边缘端看**实时步骤** | 🚧 | 任务 worker 不推 WebSocket，跨端只能轮询终态，看不到实时步骤流 |
+| 移动端 / 响应式 | 🚧 | 桌面优先，响应式适配极少 |
+| Telegram Bot | 📋 | 仅 config struct，无接线（`internal/platform/` 为死代码） |
+| 终端 TUI | 📋 | 未接入 |
+
+### 认证与部署 / Auth & Deploy
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| 用户认证 | ✅ | bcrypt + 不透明 session token（**非 JWT**），7 天 TTL |
+| 默认管理员 | ✅ | `admin` / `admin123`，可用 `CODEGATEWAY_ADMIN_PASSWORD` 覆盖 |
+| Docker / docker-compose | ✅ | 基础镜像可构建（静态二进制） |
+| 一处部署随处使用（云端故事） | 🚧 | 前端未 embed 进二进制，需单独构建；`deploy/` 目录为空，无 systemd/云脚本 |
+
+---
+
+## 三级记忆模型 / Three-Tier Memory Model
+
+CodeGateway 的核心设计假设：**大模型的 context 是稀缺、昂贵、有限的**，必须在"短期上下文"与"长期知识"之间建立清晰的搬运机制。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  短期记忆 Short-term  →  大模型 Context  ←  长期记忆 Long-term │
+│  （当前对话滑窗）         （有限 token 预算）    （FTS 全库检索）  │
+└─────────────────────────────────────────────────────────────┘
+        │                        ↑                     ↑
+   最近 N 轮原文          按预算截断/折叠         bm25 检索相关片段
+   (HistoryMaxTurns)     (ContextBudgetTokens)   (SearchRelevant)
+        │                        │                     │
+        └──── 每 N 轮 checkpoint 摘要 ──→ 沉淀为长期记忆 ──┘
+```
+
+- **短期记忆**：最近 N 轮对话原文，直接进 context（`HistoryMaxTurns`，默认 8 轮）。
+- **大模型 Context**：受 `ContextBudgetTokens`（默认 8000）约束，超预算时折叠早期消息并注入 checkpoint 摘要。
+- **长期记忆**：FTS5 全文库，按 bm25 相关度检索历史知识片段注入 context（`SearchRelevant`，带分数下限）。
+- **搬运机制**：每 N 轮触发 checkpoint，把滑出窗口的对话摘要沉淀到长期记忆。
+
+> **现状诚实说明**：checkpoint 折叠目前是**截断式拼接**而非 LLM 摘要；短期/长期无显式冷热分层。把折叠升级为真正的 LLM 摘要、并引入显式记忆分层，是路线图的核心项（见下）。
+
+---
+
+## 技术栈 / Tech Stack
 
 | 组件 | 技术 |
 |------|------|
-| 后端 | Go 1.22+ |
-| Web 框架 | Gin |
-| 数据库 | SQLite (modernc.org/sqlite, 纯 Go) |
-| 前端 | React + TypeScript + Tailwind |
-| TUI | Bubble Tea |
+| 后端 Backend | Go 1.22+ · Gin |
+| 数据库 Database | SQLite（`modernc.org/sqlite`，纯 Go，含 FTS5） |
+| 前端 Frontend | React · TypeScript · Tailwind · Vite |
+| Agent 运行时 | 自研 coder loop（`cmd/server/coder_agent.go`） |
 
-## 快速开始
+---
 
-### 安装
+## 快速开始 / Quick Start
 
 ```bash
-# 克隆项目
+# 克隆并编译 / clone & build
 git clone https://github.com/alex/codegateway.git
 cd codegateway
-
-# 编译
 CGO_ENABLED=0 go build -o codegateway ./cmd/server/
-```
 
-### 运行
-
-```bash
-# 使用默认配置运行
+# 运行（默认配置）/ run
 ./codegateway
 
-# 使用自定义配置
+# 自定义配置 / custom config
 CODEGATEWAY_CONFIG=/path/to/config.yaml ./codegateway
 ```
 
-### 配置
+前端（独立构建，暂未 embed）/ Frontend (built separately, not yet embedded):
 
-编辑 `codegateway.yaml`:
+```bash
+cd web && npm install && npm run dev   # 开发 dev
+cd web && npm run build                # 生产构建 → web/dist
+```
+
+### 配置 / Configuration
+
+编辑 `codegateway.yaml`：
 
 ```yaml
 server:
@@ -83,224 +162,148 @@ database:
 gateway:
   enabled: true
   routing:
-    strategy: "auto"  # auto, cost, latency, quality
+    strategy: "auto"   # auto · cost · latency · quality
 
 platforms:
-  telegram:
-    enabled: true
-    bot_token: "YOUR_BOT_TOKEN"
   web:
     enabled: true
 ```
 
-## API 接口
+---
 
-### 网关接口
+## API 速览 / API Overview
 
 ```bash
-# OpenAI 兼容接口
-curl http://localhost:8080/v1/gateway/chat/completions \
+# OpenAI 兼容网关 / OpenAI-compatible gateway
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Hello"}]}'
 
-# 列出可用模型（OpenAI 兼容）
+# 模型列表 / list models
 curl http://localhost:8080/v1/models
 
-# 查询单个模型
-curl http://localhost:8080/v1/models/mimo-v2.5
+# 提交后台任务 / submit a background task
+curl -X POST http://localhost:8080/v1/agent/tasks \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"重构 auth 模块并跑测试"}'
+
+# 轮询任务进度（跨端可用）/ poll task progress (works from any client)
+curl http://localhost:8080/v1/agent/tasks/<id> \
+  -H "Authorization: Bearer <token>"
 ```
 
-模型列表响应格式与 OpenAI 一致：
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "mimo-v2.5",
-      "object": "model",
-      "created": 1715367049,
-      "owned_by": "mimo"
-    }
-  ]
-}
-```
-
-SDK 可将 Base URL 设为 `http://localhost:8080/v1`，直接调用 `client.models.list()`。
-
-### Agent 接口
+### 认证 / Auth
 
 ```bash
-# Agent 对话
-curl http://localhost:8080/v1/agent/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "帮我写一个 Hello World"
-  }'
-```
-
-### 账号认证
-
-```bash
-# 注册
-curl -X POST http://localhost:8080/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@example.com","password":"secret1"}'
-
-# 登录（默认管理员 admin / admin123，可用 CODEGATEWAY_ADMIN_PASSWORD 覆盖）
+# 登录（默认 admin / admin123）/ login
 curl -X POST http://localhost:8080/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}'
 
-# 当前用户
-curl http://localhost:8080/v1/auth/me \
-  -H "Authorization: Bearer <token>"
-
-# 修改密码
-curl -X POST http://localhost:8080/v1/auth/change-password \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"current_password":"admin123","new_password":"newpass1"}'
+# 当前用户 / current user
+curl http://localhost:8080/v1/auth/me -H "Authorization: Bearer <token>"
 ```
 
-受保护接口需携带 `Authorization: Bearer <token>`。管理员可用 `X-Account-ID` 切换代管账号。
+受保护接口需携带 `Authorization: Bearer <token>`。管理员可用 `X-Account-ID` 代管其他账号。
+Protected endpoints require `Authorization: Bearer <token>`. Admins can impersonate via `X-Account-ID`.
 
-### 管理接口
+---
 
-```bash
-# 列出账号（需 admin）
-curl http://localhost:8080/v1/admin/accounts \
-  -H "Authorization: Bearer <token>"
-
-# 管理员创建账号
-curl -X POST http://localhost:8080/v1/admin/accounts \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@example.com","password":"secret1"}'
-
-# 列出当前账号的渠道
-curl http://localhost:8080/v1/admin/channels \
-  -H "Authorization: Bearer <token>"
-
-# 创建渠道
-curl -X POST http://localhost:8080/v1/admin/channels \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "openai",
-    "type": 1,
-    "key": "sk-xxx",
-    "base_url": "https://api.openai.com/v1",
-    "models": ["gpt-4o", "gpt-3.5-turbo"]
-  }'
-
-# 创建 Agnes 渠道（type=9，OpenAI 兼容）
-curl -X POST http://localhost:8080/v1/admin/channels \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Agnes",
-    "type": 9,
-    "key": "YOUR_AGNES_API_KEY",
-    "base_url": "https://apihub.agnes-ai.com/v1",
-    "models": "[\"agnes-2.0-flash\",\"agnes-1.5-flash\"]"
-  }'
-
-# 创建 GLM / 智谱渠道（type=10，OpenAI 兼容）
-curl -X POST http://localhost:8080/v1/admin/channels \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "GLM",
-    "type": 10,
-    "key": "YOUR_ZHIPU_API_KEY",
-    "base_url": "https://open.bigmodel.cn/api/paas/v4",
-    "models": "[\"glm-5.2\",\"glm-4.7\",\"glm-4-flash\"]"
-  }'
-```
-
-每个账号拥有独立的 **channels** 与 **sessions** 数据；登录后按会话用户隔离，管理员可通过 `X-Account-ID` 代管其他账号。
-
-## 项目结构
+## 项目结构 / Project Layout
 
 ```
 codegateway/
-├── cmd/
-│   ├── server/          # 主服务入口
-│   ├── agent/           # Agent CLI 入口
-│   └── migrate/         # 数据库迁移
+├── cmd/server/            # ★ 主服务入口（真正运行的实现）
+│   ├── coder_agent.go     #   Agent 循环
+│   ├── handlers.go        #   网关 relay + 路由 failover
+│   ├── agent_tasks.go     #   后台任务 REST
+│   ├── websocket.go       #   /ws 实时对话
+│   └── auth_handlers.go   #   认证
 ├── internal/
-│   ├── gateway/         # API 网关核心
-│   ├── agent/           # Agent 核心
-│   ├── tool/            # 工具系统
-│   ├── provider/        # LLM Provider 抽象
-│   ├── session/         # 会话管理
-│   ├── platform/        # 消息平台适配
-│   ├── model/           # 数据模型
-│   ├── db/              # 数据库层
-│   ├── config/          # 配置管理
-│   └── ui/              # TUI 界面
-├── web/                 # Web 前端
-├── skills/              # 内置技能
-├── deploy/              # 部署配置
-├── codegateway.yaml     # 默认配置
-├── main.go              # 入口文件
-└── README.md
+│   ├── gateway/           # 网关（relay/convert/router/billing — 部分为参考实现/stub）
+│   ├── agent/
+│   │   ├── memory/        # FTS5 记忆服务 ✅
+│   │   ├── promptctx/     # Context 构建器 ✅
+│   │   ├── task/          # 任务 worker + store ✅
+│   │   ├── tags/          # 关键词分类 ✅
+│   │   ├── cron/          # 定时调度（stub，未接入）🚧
+│   │   ├── actor/         # 子 Agent（死代码，未接入）📋
+│   │   └── agent.go       # 旧版 Agent 骨架（死代码）
+│   ├── tool/              # chroot 工具沙箱 ✅
+│   ├── provider/          # LLM Provider 抽象
+│   ├── session/           # 会话 + 认证存储
+│   └── db/                # SQLite + migrations（含 FTS5）
+├── web/                   # React 前端（Chat / Coder / ...）
+├── docs/                  # 设计文档
+├── deploy/                # 部署配置（当前为空）
+├── Dockerfile · docker-compose.yml
+└── codegateway.yaml
 ```
 
-## 开发计划
+> **注意**：`internal/agent/agent.go`、`internal/agent/actor/`、`internal/platform/` 目前是**未接入的骨架/死代码**——真正运行的实现全部在 `cmd/server/`。清理或接入这些包是路线图的一部分。
 
-### Phase 1: 基础框架 ✅
-- [x] Go 项目初始化
-- [x] SQLite 数据库层
-- [x] 配置系统
-- [x] 基础 HTTP 服务器
-- [x] 用户认证框架
-- [x] 多账号隔离（channels / sessions 按账号存储）
+---
 
-### Phase 2: API 网关 (进行中)
-- [x] Channel 模型
-- [x] OpenAI 适配器
-- [x] Provider 抽象
-- [ ] 格式转换层
-- [ ] 智能路由
-- [ ] Token 计费
+## 开发路线图 / Roadmap
 
-### Phase 3: Agent 核心 (进行中)
-- [x] Agent 循环框架
-- [x] 工具系统框架
-- [ ] 完整工具实现
-- [ ] 会话管理
-- [ ] 上下文优化
+按"离愿景最近 + 投入产出比"排序。
 
-### Phase 4: 记忆和技能
-- [ ] FTS5 记忆系统
-- [ ] 技能发现和加载
-- [ ] 任务树
-- [ ] 定时任务
+### 近期 / Near-term（打磨已有雏形）
 
-### Phase 5: 消息平台
-- [ ] Web 平台 (WebSocket)
-- [ ] Telegram 适配器
-- [ ] 微信适配器
+- **[记忆] LLM 摘要替代截断折叠** — 把 checkpoint 折叠从"拼接消息行"升级为真正的 LLM 摘要，显著提升长期记忆质量。
+- **[记忆] 显式短期/长期分层** — 引入冷热分层与"记忆晋升"机制，明确 context 搬运策略。
+- **[Agent] `edit` / `apply_patch` 工具** — 从整文件覆盖升级为增量编辑，减少 token 与出错面。
+- **[多端] 任务进度实时推送** — 让任务 worker 向 WebSocket 推步骤流，边缘端看到实时进度而非仅终态。
+- **[网关] 计费/配额真正接入请求路径** — 让 billing 在请求流中强制扣减，而非仅记录。
 
-### Phase 6: 高级功能
-- [ ] 子 Agent 调度
-- [ ] 自我进化
-- [ ] 内部 RAG
-- [ ] 自动化测试
+### 中期 / Mid-term（补齐愿景关键项）
 
-## 参考项目
+- **[定时] 落地 Cron 调度** — 实现真正的 cron 表达式解析并接入，支撑"定时自主整理"（每日摘要、记忆重组、知识库归档）。
+- **[网关] 格式转换 + Claude/Gemini 原生 endpoint** — 补全 `ConvertResponse`、Gemini provider、Claude messages endpoint。
+- **[多端] Telegram / 移动端** — 接入 Telegram bot，前端响应式适配移动端。
+- **[部署] "一处部署随处使用"** — 前端 embed 进二进制，补 `deploy/`（systemd + 云脚本 + 一键部署）。
 
-- **new-api**: API 网关架构、Channel 管理、计费系统
-- **sub2api**: 订阅配额分发、智能调度
-- **MiMo-Code**: Agent 循环、记忆系统、技能系统、任务树
-- **hermes-agent**: 消息平台集成、自我进化
-- **crush**: Go TUI、SQLite 集成
+### 远期 / Long-term（放大愿景）
 
-## 许可证
+- **[Agent] 子 Agent 调度** — 接入 Actor 模式，支持并行子任务分解。
+- **[知识库] 语义检索 / RAG** — 在 FTS 之上叠加向量检索，跨对话语义召回。
+- **[知识库] LLM 分类替代关键词** — 用 LLM 对对话做主题聚类与自动归档。
+- **[Agent] 自我进化** — 从使用模式中学习并沉淀技能。
+
+---
+
+## 待处理任务（技术债 / TODO）
+
+> 从代码库审计中提炼的可执行清单，供后续 session 直接认领。
+
+**清理 / 修复**
+- [ ] 清理死代码：`internal/agent/agent.go`、`internal/agent/actor/`、`internal/platform/`（Telegram/Web adapter 全无调用者）
+- [ ] 修复测试缺陷 `TestWorkerFailsTaskWhenOwnedWorkspaceCannotBeLoaded`（`worker_test.go:84`，缺 `ProviderForTask`+`Run` 配置，触发 fail-fast）
+- [ ] 网关核心零测试覆盖：`relay` / `relay/convert` / `relay/router` / `gateway/proxy` / `gateway/billing` 全部 `[no test files]`
+
+**功能落地**
+- [ ] Cron `calculateNextRun` 真实 cron 解析 + 接入 `cmd/server`（`cron.go:106`）
+- [ ] `ConvertResponse` 补全（`convert/converter.go:44`）
+- [ ] Gemini `ChatCompletion` 实现（`gemini.go:26`）
+- [ ] `handleClaudeMessages` / `handleGemini` 从 501 stub 补全（`handlers.go:1198,1204`）
+- [ ] 计费扣减接入请求路径（当前仅 `logUsage`，无配额强制）
+- [ ] 任务进度 → WebSocket 实时推送
+- [ ] checkpoint 折叠升级为 LLM 摘要（`promptctx/builder.go` FoldMessages）
+- [ ] 前端 `embed` 进 Go 二进制，补 `deploy/`
+
+---
+
+## 参考项目 / Inspirations
+
+- **new-api** — 网关架构、Channel 管理、计费
+- **sub2api** — 订阅配额分发、智能调度
+- **MiMo-Code** — Agent 循环、记忆系统、技能、任务树
+- **OmniRoute** — 多账号 failover 路由、熔断、冷却（见 `docs/multi-channel-failover-routing.md` 对比）
+- **hermes-agent** — 消息平台集成、自我进化
+- **crush** — Go TUI、SQLite 集成
+
+## 许可证 / License
 
 MIT License

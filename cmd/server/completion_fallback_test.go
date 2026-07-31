@@ -83,6 +83,7 @@ func TestResolveAgentTaskProviderUsesFirstEligibleOwnedProfileCandidate(t *testi
 }
 
 func TestCompleteWithCandidatesRetriesNextCandidateAndReturnsSuccessfulModel(t *testing.T) {
+	resetBreakers()
 	first := &model.Channel{ID: 1, Name: "first"}
 	second := &model.Channel{ID: 2, Name: "second"}
 	candidates := []chatCompletionCandidate{
@@ -122,6 +123,7 @@ func TestFirstStreamCandidateNeverFallsBack(t *testing.T) {
 }
 
 func TestCompleteWithCandidatesContinuesAfterProviderConstructionError(t *testing.T) {
+	resetBreakers()
 	first := &model.Channel{ID: 1, Name: "first"}
 	second := &model.Channel{ID: 2, Name: "second"}
 	var attempted []string

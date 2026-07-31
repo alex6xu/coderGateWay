@@ -456,27 +456,102 @@ func resolveModelCandidates(database *db.DB, accountID int64, requestedName stri
 	return candidates, nil
 }
 
-// completeWithCandidates retries only profile candidates, which is naturally
-// one attempt for direct model requests returned by the resolver.
+// completeWithCandidates runs the failover loop over ordered candidates with
+// per-channel circuit breaking, error classification, and a single all-cooled
+// wait (see docs/multi-channel-failover-routing.md §7).
 func completeWithCandidates(ctx context.Context, candidates []chatCompletionCandidate, request *provider.ChatCompletionRequest, newProvider func(*model.Channel) (provider.Provider, error)) (*provider.ChatCompletionResponse, chatCompletionCandidate, error) {
+	resp, candidate, err, allCooled := failoverPass(ctx, candidates, request, newProvider)
+	if err == nil {
+		return resp, candidate, nil
+	}
+
+	// §7.2③: if every candidate was skipped purely due to cooldown, wait once
+	// for the nearest cooldown to expire (within budget) and retry a single pass.
+	if allCooled {
+		wait := timeUntilNearestCooldown(candidates)
+		if wait > 0 && wait <= maxWaitBudget {
+			select {
+			case <-time.After(wait):
+				resp, candidate, err, _ = failoverPass(ctx, candidates, request, newProvider)
+				if err == nil {
+					return resp, candidate, nil
+				}
+			case <-ctx.Done():
+				return nil, chatCompletionCandidate{}, ctx.Err()
+			}
+		}
+	}
+	return nil, chatCompletionCandidate{}, err
+}
+
+// failoverPass tries each candidate once, skipping channels in active cooldown.
+// It returns allCooled=true when the only reason no attempt succeeded is that
+// every candidate was skipped by its circuit breaker.
+func failoverPass(ctx context.Context, candidates []chatCompletionCandidate, request *provider.ChatCompletionRequest, newProvider func(*model.Channel) (provider.Provider, error)) (*provider.ChatCompletionResponse, chatCompletionCandidate, error, bool) {
+	reg := breakers()
+	now := time.Now()
 	var lastErr error
+	attempted := false
+
 	for _, candidate := range candidates {
+		id := candidate.channel.ID
+		if reg.isCoolingDown(id, now) {
+			continue
+		}
+		attempted = true
+
 		prov, err := newProvider(candidate.channel)
 		if err != nil {
+			class := classifyError(err, reg.fails(id))
+			reg.reportFailure(id, class.cooldown)
 			lastErr = err
 			continue
 		}
+
 		attempt := *request
 		attempt.Model = candidate.model
 		resp, err := prov.ChatCompletion(ctx, &attempt)
 		if err != nil {
+			class := classifyError(err, reg.fails(id))
+			reg.reportFailure(id, class.cooldown)
 			lastErr = err
+			if !class.retryable {
+				return nil, chatCompletionCandidate{}, err, false
+			}
 			continue
 		}
+
+		reg.reportSuccess(id)
 		resp.Model = candidate.model
-		return resp, candidate, nil
+		return resp, candidate, nil, false
 	}
-	return nil, chatCompletionCandidate{}, lastErr
+
+	if !attempted && len(candidates) > 0 {
+		// Nothing was tried and candidates existed → all were cooling down.
+		return nil, chatCompletionCandidate{}, errAllChannelsCoolingDown, true
+	}
+	return nil, chatCompletionCandidate{}, lastErr, false
+}
+
+var errAllChannelsCoolingDown = errors.New("all candidate channels are cooling down")
+
+// timeUntilNearestCooldown returns the shortest remaining cooldown across
+// candidates, or 0 if none are cooling down.
+func timeUntilNearestCooldown(candidates []chatCompletionCandidate) time.Duration {
+	reg := breakers()
+	now := time.Now()
+	var nearest time.Duration
+	for _, candidate := range candidates {
+		until := reg.cooledDownUntil(candidate.channel.ID)
+		if until.IsZero() || !now.Before(until) {
+			continue
+		}
+		d := until.Sub(now)
+		if nearest == 0 || d < nearest {
+			nearest = d
+		}
+	}
+	return nearest
 }
 
 func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.ChatCompletionRequest) {

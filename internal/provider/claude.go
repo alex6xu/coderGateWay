@@ -100,7 +100,7 @@ func (p *ClaudeProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(raw))
+		return nil, NewProviderError(resp.StatusCode, resp.Header, raw)
 	}
 	var cr claudeResponse
 	if err := json.Unmarshal(raw, &cr); err != nil {
