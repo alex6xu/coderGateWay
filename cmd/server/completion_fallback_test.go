@@ -159,7 +159,8 @@ func seedCompletionSchema(t *testing.T, database *db.DB) {
 		CREATE TABLE channels (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,
 			type INTEGER NOT NULL, key TEXT NOT NULL, base_url TEXT, models TEXT,
-			weight INTEGER DEFAULT 1, priority INTEGER DEFAULT 0, status INTEGER DEFAULT 1
+			weight INTEGER DEFAULT 1, priority INTEGER DEFAULT 0, status INTEGER DEFAULT 1,
+			is_default INTEGER DEFAULT 0, auth_mode TEXT DEFAULT 'api_key'
 		);
 		CREATE TABLE route_profiles (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,

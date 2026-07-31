@@ -45,6 +45,7 @@ type Channel struct {
 	ModelMapping string    `json:"model_mapping"`
 	Groups       string    `json:"groups"`
 	IsDefault    int       `json:"is_default"`
+	AuthMode     string    `json:"auth_mode"` // api_key | oauth (Claude)
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -130,7 +131,6 @@ const (
 	ChannelTypeDeepSeek = 4
 	ChannelTypeOllama   = 5
 	ChannelTypeMiMo     = 6
-	ChannelTypeMiMoFree = 7
 	ChannelTypeAgnes    = 9
 	ChannelTypeGLM      = 10
 	ChannelTypeCustom   = 99

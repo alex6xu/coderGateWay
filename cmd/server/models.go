@@ -9,7 +9,6 @@ import (
 
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/model"
-	"github.com/alex/codegateway/internal/provider"
 	"github.com/gin-gonic/gin"
 )
 
@@ -176,11 +175,6 @@ func collectAvailableModels(ctx context.Context, database *db.DB, accountID int6
 }
 
 func modelsForChannel(ctx context.Context, ch *model.Channel) []string {
-	switch ch.Type {
-	case model.ChannelTypeMiMoFree:
-		return provider.MiMoFreeAdvertisedModels()
-	}
-
 	if ids := parseModelsJSON(ch.Models); len(ids) > 0 {
 		return ids
 	}
@@ -236,8 +230,8 @@ func sanitizeModelIDs(ids []string) []string {
 
 func supportsUpstreamModelList(channelType int) bool {
 	switch channelType {
-	case model.ChannelTypeOpenAI, model.ChannelTypeDeepSeek, model.ChannelTypeMiMo, model.ChannelTypeOllama,
-		model.ChannelTypeAgnes, model.ChannelTypeGLM:
+	case model.ChannelTypeOpenAI, model.ChannelTypeClaude, model.ChannelTypeDeepSeek, model.ChannelTypeMiMo, model.ChannelTypeOllama,
+		model.ChannelTypeAgnes, model.ChannelTypeGLM, model.ChannelTypeCustom:
 		return true
 	default:
 		return false
@@ -256,7 +250,7 @@ func ownedByForChannelType(channelType int) string {
 		return "deepseek"
 	case model.ChannelTypeOllama:
 		return "ollama"
-	case model.ChannelTypeMiMo, model.ChannelTypeMiMoFree:
+	case model.ChannelTypeMiMo:
 		return "mimo"
 	case model.ChannelTypeAgnes:
 		return "agnes"

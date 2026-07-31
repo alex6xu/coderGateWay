@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 )
 
 // Provider represents an LLM provider interface
@@ -27,20 +26,21 @@ type Provider interface {
 
 // ChatCompletionRequest represents a chat completion request
 type ChatCompletionRequest struct {
-	Model            string         `json:"model"`
-	Messages         []Message      `json:"messages"`
-	Temperature      *float64       `json:"temperature,omitempty"`
-	MaxTokens        *int           `json:"max_tokens,omitempty"`
-	TopP             *float64       `json:"top_p,omitempty"`
-	Stream           bool           `json:"stream"`
-	Tools            []Tool         `json:"tools,omitempty"`
-	PromptCacheKey   string         `json:"prompt_cache_key,omitempty"`
-	StreamOptions    *StreamOptions `json:"stream_options,omitempty"`
+	Model          string         `json:"model"`
+	Messages       []Message      `json:"messages"`
+	Temperature    *float64       `json:"temperature,omitempty"`
+	MaxTokens      *int           `json:"max_tokens,omitempty"`
+	TopP           *float64       `json:"top_p,omitempty"`
+	Stop           interface{}    `json:"stop,omitempty"` // string | []string
+	ToolChoice     interface{}    `json:"tool_choice,omitempty"`
+	Stream         bool           `json:"stream"`
+	Tools          []Tool         `json:"tools,omitempty"`
+	PromptCacheKey string         `json:"prompt_cache_key,omitempty"`
+	StreamOptions  *StreamOptions `json:"stream_options,omitempty"`
 	// EnablePromptCache hints providers that support explicit cache markers (e.g. Anthropic).
 	EnablePromptCache bool `json:"-"`
 	// SessionID carries an upstream conversation identifier (from the X-Session-Id
-	// header) used to derive a stable per-session X-Session-Affinity for the free
-	// mimo-auto endpoint. Not serialized to the upstream request body.
+	// header). Not serialized to the upstream request body.
 	SessionID string `json:"-"`
 }
 
@@ -80,8 +80,9 @@ type ToolFunction struct {
 
 // ToolCall represents a tool call
 type ToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
+	Index    *int         `json:"index,omitempty"` // streaming OpenAI-compat tool_calls index
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
 	Function ToolFunction `json:"function"`
 }
 
@@ -194,47 +195,24 @@ const (
 	ProviderTypeClaude   ProviderType = "claude"
 	ProviderTypeGemini   ProviderType = "gemini"
 	ProviderTypeDeepSeek ProviderType = "deepseek"
-	ProviderTypeOllama   ProviderType = "ollama"
-	ProviderTypeMiMo     ProviderType = "mimo"
-	ProviderTypeMiMoFree ProviderType = "mimo-free"
-	ProviderTypeAgnes    ProviderType = "agnes"
-	ProviderTypeGLM      ProviderType = "glm"
-	ProviderTypeCustom   ProviderType = "custom"
+	ProviderTypeOllama ProviderType = "ollama"
+	ProviderTypeMiMo   ProviderType = "mimo"
+	ProviderTypeAgnes  ProviderType = "agnes"
+	ProviderTypeGLM    ProviderType = "glm"
+	ProviderTypeCustom ProviderType = "custom"
 )
 
 // ProviderConfig represents provider configuration
 type ProviderConfig struct {
-	Name    string       `json:"name"`
-	Type    ProviderType `json:"type"`
-	BaseURL string       `json:"base_url"`
-	APIKey  string       `json:"api_key"`
-	Models  []string     `json:"models"`
-}
-
-// Singleton provider cache: keyed by "type|base_url".
-// Ensures mimo-free requests share one MiMoFreeProvider instance so that
-// throttle/rate-limit state is global, not per-request.
-var (
-	singletonMu        sync.Mutex
-	singletonProviders = make(map[string]Provider)
-)
-
-// GetOrCreateSingleton returns a cached provider for the given config, creating
-// one if it does not yet exist. Use this for providers that carry per-instance
-// state (e.g. MiMoFreeProvider's throttle and fingerprint).
-func GetOrCreateSingleton(config *ProviderConfig) (Provider, error) {
-	key := string(config.Type) + "|" + config.BaseURL
-	singletonMu.Lock()
-	defer singletonMu.Unlock()
-	if p, ok := singletonProviders[key]; ok {
-		return p, nil
-	}
-	p, err := NewProvider(config)
-	if err != nil {
-		return nil, err
-	}
-	singletonProviders[key] = p
-	return p, nil
+	Name     string       `json:"name"`
+	Type     ProviderType `json:"type"`
+	BaseURL  string       `json:"base_url"`
+	APIKey   string       `json:"api_key"`
+	Models   []string     `json:"models"`
+	AuthMode string       `json:"-"` // api_key (default) | oauth
+	// Claude OAuth identity (OmniRoute fingerprint); ignored for api_key mode.
+	ClaudeDeviceID    string `json:"-"`
+	ClaudeAccountUUID string `json:"-"`
 }
 
 // Registry manages providers
@@ -265,9 +243,7 @@ func NewProvider(config *ProviderConfig) (Provider, error) {
 	case ProviderTypeOllama:
 		return NewOllamaProvider(config), nil
 	case ProviderTypeMiMo:
-		return NewOpenAIProvider(config), nil
-	case ProviderTypeMiMoFree:
-		return NewMiMoFreeProvider(config), nil
+		return NewMiMoProvider(config), nil
 	case ProviderTypeAgnes, ProviderTypeGLM:
 		return NewOpenAIProvider(config), nil
 	case ProviderTypeCustom:

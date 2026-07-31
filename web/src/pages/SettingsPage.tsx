@@ -1,14 +1,108 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
+import { apiFetch, useAccount } from '../context/AccountContext'
 import { useAuth } from '../context/AuthContext'
 
 export default function SettingsPage() {
   const { user, changePassword } = useAuth()
+  const { currentAccount } = useAccount()
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+
+  const [claudeConfigured, setClaudeConfigured] = useState(false)
+  const [claudeConnected, setClaudeConnected] = useState(false)
+  const [claudeBusy, setClaudeBusy] = useState(false)
+  const [claudeError, setClaudeError] = useState('')
+  const [claudePaste, setClaudePaste] = useState('')
+  const [claudeMsg, setClaudeMsg] = useState('')
+
+  const [claudeEmail, setClaudeEmail] = useState('')
+
+  const fetchClaudeStatus = async () => {
+    try {
+      const res = await apiFetch('/v1/claude/oauth/status', {}, currentAccount?.id)
+      if (!res.ok) return
+      const data = await res.json()
+      setClaudeConfigured(!!data.configured)
+      setClaudeConnected(!!data.connected)
+      setClaudeEmail(data.email || '')
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    fetchClaudeStatus()
+    const params = new URLSearchParams(window.location.search)
+    const oauth = params.get('claude_oauth')
+    if (oauth === 'connected') {
+      setClaudeMsg('Claude 订阅已连接')
+      window.history.replaceState({}, '', window.location.pathname)
+      fetchClaudeStatus()
+    } else if (oauth === 'error') {
+      setClaudeError(params.get('message') || 'OAuth 失败')
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [currentAccount?.id])
+
+  const startClaudePaste = async () => {
+    setClaudeError('')
+    setClaudeMsg('')
+    setClaudeBusy(true)
+    try {
+      const res = await apiFetch('/v1/claude/oauth/authorize?mode=paste', {}, currentAccount?.id)
+      const data = await res.json()
+      if (!res.ok) {
+        setClaudeError(data.error || '无法开始授权')
+        return
+      }
+      window.open(data.authorize_url, '_blank', 'noopener,noreferrer')
+      setClaudeMsg('已在新标签页打开授权。完成后复制页面上的 code#state，粘贴到下方并提交。')
+    } catch {
+      setClaudeError('网络错误')
+    } finally {
+      setClaudeBusy(false)
+    }
+  }
+
+  const submitClaudePaste = async () => {
+    setClaudeError('')
+    setClaudeMsg('')
+    setClaudeBusy(true)
+    try {
+      const res = await apiFetch('/v1/claude/oauth/exchange', {
+        method: 'POST',
+        body: JSON.stringify({ code: claudePaste }),
+      }, currentAccount?.id)
+      const data = await res.json()
+      if (!res.ok) {
+        setClaudeError(data.error || '换取 token 失败')
+        return
+      }
+      setClaudePaste('')
+      setClaudeMsg('Claude 订阅已连接')
+      fetchClaudeStatus()
+    } catch {
+      setClaudeError('网络错误')
+    } finally {
+      setClaudeBusy(false)
+    }
+  }
+
+  const disconnectClaude = async () => {
+    if (!confirm('确定断开 Claude 订阅 OAuth？')) return
+    setClaudeBusy(true)
+    try {
+      await apiFetch('/v1/claude/oauth/disconnect', { method: 'DELETE' }, currentAccount?.id)
+      setClaudeConnected(false)
+      setClaudeMsg('已断开')
+    } finally {
+      setClaudeBusy(false)
+    }
+  }
 
   const onChangePassword = async (e: FormEvent) => {
     e.preventDefault()
@@ -79,6 +173,72 @@ export default function SettingsPage() {
             指向 Whisper 兼容服务（如 speaches / faster-whisper），或设置环境变量
             <code className="mx-1 text-[12px]">ASR_BASE_URL</code>。
           </p>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl p-5">
+          <h3 className="text-sm font-semibold text-foreground mb-2">Claude 订阅 OAuth</h3>
+          <p className="text-[13px] text-muted-foreground leading-relaxed mb-3">
+            对齐 OmniRoute / Claude Code：在新标签页登录 Anthropic，把授权页显示的
+            <code className="mx-1 text-[12px]">code#state</code>
+            粘贴回来。连接后可在 Channels 勾选「使用订阅 OAuth」。
+          </p>
+          {!claudeConfigured ? (
+            <p className="text-[12px] text-amber-500">服务端未启用 claude_oauth（检查 codegateway.yaml）。</p>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-[13px]">
+                状态：{claudeConnected ? (
+                  <span className="text-green-500 font-medium">
+                    已连接{claudeEmail ? `（${claudeEmail}）` : ''}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">未连接</span>
+                )}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {!claudeConnected ? (
+                  <button
+                    type="button"
+                    disabled={claudeBusy}
+                    onClick={startClaudePaste}
+                    className="h-9 px-4 bg-primary text-primary-foreground rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50"
+                  >
+                    打开授权页
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={claudeBusy}
+                    onClick={disconnectClaude}
+                    className="h-9 px-4 text-destructive border border-destructive/30 rounded-lg text-[13px] hover:bg-destructive/10 disabled:opacity-50"
+                  >
+                    断开连接
+                  </button>
+                )}
+              </div>
+              <div>
+                <label className="block text-[12px] text-muted-foreground mb-1">粘贴 authorization code（code#state）</label>
+                <div className="flex gap-2">
+                  <input
+                    value={claudePaste}
+                    onChange={(e) => setClaudePaste(e.target.value)}
+                    placeholder="xxxx#yyyy"
+                    className="flex-1 h-9 px-3 bg-background border border-border rounded-lg text-[13px] focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <button
+                    type="button"
+                    disabled={claudeBusy || !claudePaste.trim()}
+                    onClick={submitClaudePaste}
+                    className="h-9 px-3 border border-primary/30 text-primary rounded-lg text-[12px] hover:bg-primary/10 disabled:opacity-50"
+                  >
+                    提交
+                  </button>
+                </div>
+              </div>
+              {claudeError && <p className="text-[12px] text-red-500">{claudeError}</p>}
+              {claudeMsg && <p className="text-[12px] text-green-500">{claudeMsg}</p>}
+            </div>
+          )}
         </div>
 
         <div className="bg-card border border-border rounded-xl p-5">

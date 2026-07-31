@@ -16,9 +16,10 @@ type Config struct {
 	Agent    AgentConfig    `yaml:"agent"`
 	Gateway  GatewayConfig  `yaml:"gateway"`
 	Platform PlatformConfig `yaml:"platforms"`
-	Billing  BillingConfig  `yaml:"billing"`
-	GitHub   GitHubConfig   `yaml:"github"`
-	ASR      ASRConfig      `yaml:"asr"`
+	Billing      BillingConfig      `yaml:"billing"`
+	GitHub       GitHubConfig       `yaml:"github"`
+	ClaudeOAuth  ClaudeOAuthConfig  `yaml:"claude_oauth"`
+	ASR          ASRConfig          `yaml:"asr"`
 }
 
 // GitHubConfig enables OAuth and repository import into workspaces.
@@ -29,6 +30,15 @@ type GitHubConfig struct {
 	RedirectURL  string `yaml:"redirect_url"` // e.g. http://localhost:8080/v1/github/callback
 	FrontendURL  string `yaml:"frontend_url"` // e.g. http://localhost:5173/code
 	Scopes       string `yaml:"scopes"`       // default: read:user repo
+}
+
+// ClaudeOAuthConfig enables Claude Code / claude.ai subscription OAuth (PKCE).
+type ClaudeOAuthConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	ClientID    string `yaml:"client_id"`    // default: Claude Code public client
+	RedirectURL string `yaml:"redirect_url"` // gateway callback for auto mode
+	FrontendURL string `yaml:"frontend_url"` // e.g. /settings
+	Scopes      string `yaml:"scopes"`
 }
 
 // ASRConfig proxies audio to an OpenAI-compatible Whisper transcription API
@@ -228,6 +238,40 @@ func applyEnvOverrides(cfg *Config) {
 	if cfg.GitHub.RedirectURL == "" && cfg.Server.Port > 0 {
 		cfg.GitHub.RedirectURL = fmt.Sprintf("http://localhost:%d/v1/github/callback", cfg.Server.Port)
 	}
+
+	// Claude Code subscription OAuth (PKCE public client — enabled by default).
+	if v := os.Getenv("CLAUDE_OAUTH_ENABLED"); v == "0" || strings.EqualFold(v, "false") {
+		cfg.ClaudeOAuth.Enabled = false
+	} else if v == "1" || strings.EqualFold(v, "true") {
+		cfg.ClaudeOAuth.Enabled = true
+	}
+	if v := os.Getenv("CLAUDE_OAUTH_CLIENT_ID"); v != "" {
+		cfg.ClaudeOAuth.ClientID = v
+	}
+	if v := os.Getenv("CLAUDE_OAUTH_REDIRECT_URL"); v != "" {
+		cfg.ClaudeOAuth.RedirectURL = v
+	}
+	if v := os.Getenv("CLAUDE_OAUTH_FRONTEND_URL"); v != "" {
+		cfg.ClaudeOAuth.FrontendURL = v
+	}
+	if cfg.ClaudeOAuth.ClientID == "" {
+		cfg.ClaudeOAuth.ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	}
+	if cfg.ClaudeOAuth.Scopes == "" {
+		cfg.ClaudeOAuth.Scopes = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers"
+	}
+	if cfg.ClaudeOAuth.FrontendURL == "" {
+		cfg.ClaudeOAuth.FrontendURL = "/settings"
+	}
+	// OmniRoute default: official Claude Code redirect (paste code#state).
+	if cfg.ClaudeOAuth.RedirectURL == "" {
+		if v := os.Getenv("CLAUDE_CODE_REDIRECT_URI"); v != "" {
+			cfg.ClaudeOAuth.RedirectURL = v
+		} else {
+			cfg.ClaudeOAuth.RedirectURL = "https://platform.claude.com/oauth/code/callback"
+		}
+	}
+
 	if v := os.Getenv("ASR_BASE_URL"); v != "" {
 		cfg.ASR.BaseURL = v
 		cfg.ASR.Enabled = true
@@ -336,6 +380,13 @@ func defaultConfig() *Config {
 			Scopes:      "read:user repo",
 			FrontendURL: "/code",
 			RedirectURL: "http://localhost:8080/v1/github/callback",
+		},
+		ClaudeOAuth: ClaudeOAuthConfig{
+			Enabled:     true,
+			ClientID:    "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+			Scopes:      "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers",
+			FrontendURL: "/settings",
+			RedirectURL: "https://platform.claude.com/oauth/code/callback",
 		},
 		ASR: ASRConfig{
 			Enabled:  false,

@@ -11,12 +11,16 @@ import (
 	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/agent/memory"
 	"github.com/alex/codegateway/internal/agent/tags"
+	"github.com/alex/codegateway/internal/claudeoauth"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/githubvcs"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 )
+
+// claudeOAuthSvc is set in Run and used by createProviderFromChannel for subscription auth.
+var claudeOAuthSvc *claudeoauth.Service
 
 func Run() error {
 	// Load configuration
@@ -59,6 +63,13 @@ func Run() error {
 		log.Printf("GitHub OAuth disabled (set github.client_id/secret or GITHUB_CLIENT_ID/SECRET)")
 	}
 
+	claudeOAuthSvc = claudeoauth.NewService(database.DB, cfg.ClaudeOAuth)
+	if claudeOAuthSvc.Configured() {
+		log.Printf("Claude OAuth enabled (client_id=%s…)", trimID(cfg.ClaudeOAuth.ClientID))
+	} else {
+		log.Printf("Claude OAuth disabled (set claude_oauth.enabled: true)")
+	}
+
 	// Initialize default channels for the default account
 	initDefaultChannels(database, cfg, defaultAccount.ID)
 	taskWorker := newAgentTaskWorker(database, workspaceMgr, cfg)
@@ -81,7 +92,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc, tagSvc)
+	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc, claudeOAuthSvc, tagSvc)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -102,7 +113,7 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service, tagSvc *tags.Service) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service, claudeOAuth *claudeoauth.Service, tagSvc *tags.Service) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -143,8 +154,9 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			auth.POST("/change-password", requireAuth(accountMgr), handleChangePassword(accountMgr))
 		}
 
-		// GitHub OAuth callback must be public (browser redirect); state binds to user.
+		// GitHub / Claude OAuth callbacks must be public (browser redirect); state binds to user.
 		v1.GET("/github/callback", handleGitHubCallback(ghSvc))
+		v1.GET("/claude/oauth/callback", handleClaudeOAuthCallback(claudeOAuth))
 
 		protected := v1.Group("")
 		protected.Use(requireAuth(accountMgr))
@@ -195,6 +207,14 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				ghAPI.DELETE("/disconnect", handleGitHubDisconnect(ghSvc))
 				ghAPI.GET("/repos", handleGitHubListRepos(ghSvc))
 				ghAPI.POST("/import", handleGitHubImportRepo(ghSvc, workspaceMgr))
+			}
+
+			claudeAPI := protected.Group("/claude/oauth")
+			{
+				claudeAPI.GET("/status", handleClaudeOAuthStatus(claudeOAuth))
+				claudeAPI.GET("/authorize", handleClaudeOAuthAuthorize(claudeOAuth))
+				claudeAPI.POST("/exchange", handleClaudeOAuthExchange(claudeOAuth))
+				claudeAPI.DELETE("/disconnect", handleClaudeOAuthDisconnect(claudeOAuth))
 			}
 
 			protected.GET("/asr/status", handleASRStatus(cfg))

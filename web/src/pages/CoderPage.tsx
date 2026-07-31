@@ -147,7 +147,7 @@ export default function CoderPage() {
       setModels(list)
       if (list.length > 0) {
         const preferred =
-          list.find((m) => m.id.includes('mimo-auto')) ||
+          list.find((m) => m.id.includes('mimo')) ||
           list.find((m) => m.id.includes('glm')) ||
           list.find((m) => m.id.includes('coder') || m.id.includes('code')) ||
           list[0]

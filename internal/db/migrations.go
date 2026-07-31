@@ -250,6 +250,33 @@ CREATE TABLE IF NOT EXISTS github_oauth_states (
 );
 CREATE INDEX IF NOT EXISTS idx_github_oauth_states_expires ON github_oauth_states(expires_at);
 
+-- Claude Code subscription OAuth (one connection per account)
+CREATE TABLE IF NOT EXISTS claude_connections (
+    user_id INTEGER PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT DEFAULT '',
+    scopes TEXT DEFAULT '',
+    subscription_type TEXT DEFAULT '',
+    device_id TEXT DEFAULT '',
+    account_uuid TEXT DEFAULT '',
+    expires_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS claude_oauth_states (
+    state TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    code_verifier TEXT NOT NULL,
+    redirect_uri TEXT NOT NULL,
+    mode TEXT DEFAULT 'auto',
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_claude_oauth_states_expires ON claude_oauth_states(expires_at);
+
 -- Auto-classified tags for user questions
 CREATE TABLE IF NOT EXISTS question_tags (
     id TEXT PRIMARY KEY,
@@ -313,6 +340,14 @@ func Migrate(db *DB) error {
 		return err
 	}
 
+	if err := ensureChannelAuthModeColumn(db); err != nil {
+		return err
+	}
+
+	if err := ensureClaudeConnectionIdentityColumns(db); err != nil {
+		return err
+	}
+
 	log.Println("Database migrations completed")
 	return nil
 }
@@ -352,6 +387,39 @@ func ensureChannelDefaultColumn(db *DB) error {
 	log.Println("Migrating channels: adding is_default")
 	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN is_default INTEGER DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to add channels.is_default: %w", err)
+	}
+	return nil
+}
+
+func ensureChannelAuthModeColumn(db *DB) error {
+	has, err := tableHasColumn(db, "channels", "auth_mode")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	log.Println("Migrating channels: adding auth_mode")
+	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN auth_mode TEXT DEFAULT 'api_key'"); err != nil {
+		return fmt.Errorf("failed to add channels.auth_mode: %w", err)
+	}
+	return nil
+}
+
+func ensureClaudeConnectionIdentityColumns(db *DB) error {
+	for _, col := range []string{"device_id", "account_uuid"} {
+		has, err := tableHasColumn(db, "claude_connections", col)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		log.Printf("Migrating claude_connections: adding %s", col)
+		stmt := fmt.Sprintf("ALTER TABLE claude_connections ADD COLUMN %s TEXT DEFAULT ''", col)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("failed to add claude_connections.%s: %w", col, err)
+		}
 	}
 	return nil
 }

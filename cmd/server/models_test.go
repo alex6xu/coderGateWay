@@ -8,8 +8,8 @@ import (
 )
 
 func TestParseModelsJSON(t *testing.T) {
-	got := parseModelsJSON(`["gpt-4o"," mimo-auto "]`)
-	if len(got) != 2 || got[0] != "gpt-4o" || got[1] != "mimo-auto" {
+	got := parseModelsJSON(`["gpt-4o"," mimo-v2.5 "]`)
+	if len(got) != 2 || got[0] != "gpt-4o" || got[1] != "mimo-v2.5" {
 		t.Fatalf("unexpected parse result: %#v", got)
 	}
 
@@ -29,7 +29,7 @@ func TestOwnedByForChannelType(t *testing.T) {
 		model.ChannelTypeClaude:   "anthropic",
 		model.ChannelTypeGemini:   "google",
 		model.ChannelTypeDeepSeek: "deepseek",
-		model.ChannelTypeMiMoFree: "mimo",
+		model.ChannelTypeMiMo:     "mimo",
 		model.ChannelTypeCustom:   "custom",
 		999:                       "codegateway",
 	}
@@ -55,7 +55,10 @@ func TestSupportsUpstreamModelList(t *testing.T) {
 	if !supportsUpstreamModelList(model.ChannelTypeOpenAI) {
 		t.Fatal("openai should support upstream model list")
 	}
-	if supportsUpstreamModelList(model.ChannelTypeClaude) {
-		t.Fatal("claude should not use openai-style upstream model list by default")
+	if !supportsUpstreamModelList(model.ChannelTypeClaude) {
+		t.Fatal("claude should support Anthropic /v1/models upstream list")
+	}
+	if !supportsUpstreamModelList(model.ChannelTypeCustom) {
+		t.Fatal("custom should support upstream model list")
 	}
 }

@@ -81,9 +81,6 @@ billing:
   currency: "USD"
   
   pricing:
-    mimo-auto:
-      input: 0
-      output: 0
     mimo-v2.5-pro:
       input: 0.5
       output: 2.0
@@ -124,6 +121,15 @@ github:
   redirect_url: "http://localhost:8080/v1/github/callback"
   frontend_url: "/code"
   scopes: "read:user repo"
+
+# Claude Code / claude.ai subscription OAuth (PKCE) — aligned with OmniRoute:
+# redirect is Anthropic's official page; user pastes code#state back into the UI.
+claude_oauth:
+  enabled: true
+  client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+  redirect_url: "https://platform.claude.com/oauth/code/callback"
+  frontend_url: "/settings"
+  scopes: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers"
 
 # Optional server ASR (OpenAI-compatible Whisper). Browser Web Speech is preferred by default.
 # Example local stack: speaches / faster-whisper OpenAI-compatible server

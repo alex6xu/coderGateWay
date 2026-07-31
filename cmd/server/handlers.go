@@ -36,7 +36,7 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 		}
 
 		rows, err := database.Query(`
-			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, is_default, created_at, updated_at
+			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, is_default, COALESCE(auth_mode, 'api_key'), created_at, updated_at
 			FROM channels WHERE user_id = ? ORDER BY id DESC
 		`, accountID)
 		if err != nil {
@@ -48,7 +48,7 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 		channels := make([]model.Channel, 0)
 		for rows.Next() {
 			var ch model.Channel
-			err := rows.Scan(&ch.ID, &ch.UserID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.IsDefault, &ch.CreatedAt, &ch.UpdatedAt)
+			err := rows.Scan(&ch.ID, &ch.UserID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.Balance, &ch.UsedQuota, &ch.ModelMapping, &ch.Groups, &ch.IsDefault, &ch.AuthMode, &ch.CreatedAt, &ch.UpdatedAt)
 			if err != nil {
 				continue
 			}
@@ -78,10 +78,32 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 			Priority     int    `json:"priority"`
 			ModelMapping string `json:"model_mapping"`
 			Groups       string `json:"groups"`
+			AuthMode     string `json:"auth_mode"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if req.Type == 7 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "mimo free channel type is no longer supported; use MiMo (API key) instead"})
+			return
+		}
+
+		req.Name = strings.TrimSpace(strings.ToLower(req.Name))
+		if req.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			return
+		}
+
+		authMode := normalizeChannelAuthMode(req.AuthMode, req.Type)
+		if authMode == "oauth" && req.Type != model.ChannelTypeClaude {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_mode=oauth is only supported for Claude channels"})
+			return
+		}
+		if authMode != "oauth" && strings.TrimSpace(req.Key) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "api key is required"})
 			return
 		}
 
@@ -95,9 +117,9 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 
 		now := time.Now()
 		result, err := database.Exec(`
-			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, model_mapping, groups, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-		`, accountID, req.Name, req.Type, req.Key, req.BaseURL, req.Models, req.Weight, req.Priority, req.ModelMapping, req.Groups, now, now)
+			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, model_mapping, groups, auth_mode, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+		`, accountID, req.Name, req.Type, req.Key, req.BaseURL, req.Models, req.Weight, req.Priority, req.ModelMapping, req.Groups, authMode, now, now)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create channel"})
@@ -144,10 +166,16 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 			ModelMapping *string `json:"model_mapping"`
 			Groups       *string `json:"groups"`
 			IsDefault    *int    `json:"is_default"`
+			AuthMode     *string `json:"auth_mode"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if req.Type != nil && *req.Type == 7 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "mimo free channel type is no longer supported; use MiMo (API key) instead"})
 			return
 		}
 
@@ -156,12 +184,34 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 		args := []interface{}{time.Now()}
 
 		if req.Name != nil {
+			normalized := strings.TrimSpace(strings.ToLower(*req.Name))
+			if normalized == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+				return
+			}
 			query += ", name = ?"
-			args = append(args, *req.Name)
+			args = append(args, normalized)
 		}
 		if req.Type != nil {
 			query += ", type = ?"
 			args = append(args, *req.Type)
+		}
+		if req.AuthMode != nil {
+			mode := normalizeChannelAuthMode(*req.AuthMode, 0)
+			if mode == "oauth" {
+				chType := 0
+				if req.Type != nil {
+					chType = *req.Type
+				} else {
+					_ = database.QueryRow(`SELECT type FROM channels WHERE id = ? AND user_id = ?`, channelID, accountID).Scan(&chType)
+				}
+				if chType != model.ChannelTypeClaude {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "auth_mode=oauth is only supported for Claude channels"})
+					return
+				}
+			}
+			query += ", auth_mode = ?"
+			args = append(args, mode)
 		}
 		if req.Key != nil {
 			query += ", key = ?"
@@ -653,20 +703,15 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 			)
 			_ = workspaceMgr.RefreshStats(ws)
 		} else {
-			var messages []provider.Message
-			if channel.Type == model.ChannelTypeMiMoFree {
-				messages = buildAgentMessages(channel, modelName, req.Message, mode)
-			} else {
-				messages = promptctx.Build(database.DB, promptctx.Options{
-					System:       system,
-					UserMessage:  req.Message,
-					SessionID:    sessionID,
-					ExcludeMsgID: userMsgID,
-					ProjectID:    projectID,
-					Cfg:          cfg.Agent,
-					Memory:       mem,
-				})
-			}
+			messages := promptctx.Build(database.DB, promptctx.Options{
+				System:       system,
+				UserMessage:  req.Message,
+				SessionID:    sessionID,
+				ExcludeMsgID: userMsgID,
+				ProjectID:    projectID,
+				Cfg:          cfg.Agent,
+				Memory:       mem,
+			})
 
 			chatReq := &provider.ChatCompletionRequest{
 				Model:       modelName,
@@ -938,7 +983,7 @@ func sessionOwnedBy(database *db.DB, sessionID string, accountID int64) bool {
 
 func findChannelForModel(database *db.DB, accountID int64, modelName string) (*model.Channel, error) {
 	rows, err := database.Query(`
-		SELECT id, name, type, key, base_url, models, weight, priority, status
+		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status, COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
 		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC
 	`, accountID)
 	if err != nil {
@@ -951,10 +996,15 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 
 	for rows.Next() {
 		var ch model.Channel
-		rows.Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
+		var userID int64
+		if err := rows.Scan(&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status, &ch.IsDefault, &ch.AuthMode); err != nil {
+			continue
+		}
+		ch.UserID = &userID
 
 		if ch.Models == "" {
-			matches = append(matches, &ch)
+			chCopy := ch
+			matches = append(matches, &chCopy)
 			continue
 		}
 
@@ -971,23 +1021,9 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 		return nil, fmt.Errorf("no channel found for model: %s", modelName)
 	}
 
-	// Explicit default channel always wins — even over MiMo special routing
+	// Explicit default channel always wins
 	for _, ch := range matches {
 		if ch.IsDefault == 1 {
-			return ch, nil
-		}
-	}
-
-	if normalizedRequest == "mimo-auto" || normalizedRequest == "mimo-free" || strings.HasPrefix(normalizedRequest, "mimo-") {
-		for _, ch := range matches {
-			if ch.Type == model.ChannelTypeMiMoFree {
-				return ch, nil
-			}
-		}
-	}
-
-	for _, ch := range matches {
-		if ch.Type == model.ChannelTypeMiMoFree && ch.Models == "" {
 			return ch, nil
 		}
 	}
@@ -997,27 +1033,36 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 
 func createProviderFromChannel(channel *model.Channel) (provider.Provider, error) {
 	providerCfg := &provider.ProviderConfig{
-		Name:    channel.Name,
-		Type:    getProviderType(channel.Type),
-		BaseURL: channel.BaseURL,
-		APIKey:  channel.Key,
+		Name:     channel.Name,
+		Type:     getProviderType(channel.Type),
+		BaseURL:  channel.BaseURL,
+		APIKey:   channel.Key,
+		AuthMode: channel.AuthMode,
 	}
 	if providerCfg.BaseURL == "" {
 		providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
 	}
-	// Use singleton for mimo-free so that throttle/fingerprint state
-	// is preserved across requests (the global lock inside doChat also
-	// requires a single instance to work correctly).
-	if channel.Type == model.ChannelTypeMiMoFree {
-		return provider.GetOrCreateSingleton(providerCfg)
+	if strings.EqualFold(channel.AuthMode, "oauth") && channel.Type == model.ChannelTypeClaude {
+		if claudeOAuthSvc == nil || !claudeOAuthSvc.Configured() {
+			return nil, fmt.Errorf("claude oauth is not enabled")
+		}
+		accountID := int64(0)
+		if channel.UserID != nil {
+			accountID = *channel.UserID
+		}
+		creds, err := claudeOAuthSvc.ValidCreds(context.Background(), accountID)
+		if err != nil {
+			return nil, fmt.Errorf("claude oauth token: %w", err)
+		}
+		providerCfg.APIKey = creds.AccessToken
+		providerCfg.AuthMode = "oauth"
+		providerCfg.ClaudeDeviceID = creds.DeviceID
+		providerCfg.ClaudeAccountUUID = creds.AccountUUID
 	}
 	return provider.NewProvider(providerCfg)
 }
 
 func resolveModelForChannel(channel *model.Channel, modelName string) string {
-	if channel.Type == model.ChannelTypeMiMoFree {
-		return provider.NormalizeModelForMiMoAuto(modelName)
-	}
 	if modelName == "" {
 		if models := parseModelsJSON(channel.Models); len(models) > 0 {
 			return models[0]
@@ -1027,16 +1072,6 @@ func resolveModelForChannel(channel *model.Channel, modelName string) string {
 }
 
 func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode string) []provider.Message {
-	if channel.Type == model.ChannelTypeMiMoFree {
-		if mode == "coder" {
-			return []provider.Message{{
-				Role: "user",
-				Content: "[CodeGateway Coder mode] Act as an expert software engineer. Prefer concrete code, diffs, and step-by-step implementation guidance.\n\n" + userMessage,
-			}}
-		}
-		return []provider.Message{{Role: "user", Content: userMessage}}
-	}
-
 	system := fmt.Sprintf(
 		"You are a helpful AI assistant. When asked about your identity, say you are the %s model served by CodeGateway.",
 		modelName,
@@ -1058,37 +1093,42 @@ func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode str
 
 func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
 	var ch model.Channel
+	var userID int64
 	err := database.QueryRow(`
-		SELECT id, name, type, key, base_url, models, weight, priority, status
+		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status,
+		       COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
 		FROM channels WHERE status = 1 AND user_id = ? ORDER BY is_default DESC, priority DESC, weight DESC LIMIT 1
-	`, accountID).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
-
+	`, accountID).Scan(
+		&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status,
+		&ch.IsDefault, &ch.AuthMode,
+	)
 	if err != nil {
 		return nil, err
 	}
+	ch.UserID = &userID
 	return &ch, nil
 }
 
 func getProviderType(channelType int) provider.ProviderType {
 	switch channelType {
-	case 1:
+	case model.ChannelTypeOpenAI:
 		return provider.ProviderTypeOpenAI
-	case 2:
+	case model.ChannelTypeClaude:
 		return provider.ProviderTypeClaude
-	case 3:
+	case model.ChannelTypeGemini:
 		return provider.ProviderTypeGemini
-	case 4:
+	case model.ChannelTypeDeepSeek:
 		return provider.ProviderTypeDeepSeek
-	case 5:
+	case model.ChannelTypeOllama:
 		return provider.ProviderTypeOllama
-	case 6:
+	case model.ChannelTypeMiMo:
 		return provider.ProviderTypeMiMo
-	case 7:
-		return provider.ProviderTypeMiMoFree
-	case 9:
+	case model.ChannelTypeAgnes:
 		return provider.ProviderTypeAgnes
-	case 10:
+	case model.ChannelTypeGLM:
 		return provider.ProviderTypeGLM
+	case model.ChannelTypeCustom:
+		return provider.ProviderTypeCustom
 	default:
 		return provider.ProviderTypeOpenAI
 	}
@@ -1106,8 +1146,6 @@ func getDefaultBaseURL(channelType int) string {
 		return "https://api.deepseek.com/v1"
 	case 6:
 		return "https://api.xiaomimimo.com/v1"
-	case 7:
-		return "https://api.xiaomimimo.com"
 	case 9:
 		return "https://apihub.agnes-ai.com/v1"
 	case 10:

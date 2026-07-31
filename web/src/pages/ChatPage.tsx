@@ -159,9 +159,6 @@ export default function ChatPage() {
         }
 
         let content = data.response || data.error || 'No response'
-        if (content.includes('bootstrap failed') || content.includes('mimo-auto token') || content.includes('Illegal access')) {
-          content = '⚠️ ' + content + '\n\nMiMo Free 通道直连小米免费 API，请确认网络可访问 api.xiaomimimo.com，且 Channels 中存在类型 7 渠道。'
-        }
 
         setMessages(prev => [...prev, {
           id: Date.now().toString(),

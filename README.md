@@ -110,7 +110,7 @@ curl http://localhost:8080/v1/gateway/chat/completions \
 curl http://localhost:8080/v1/models
 
 # 查询单个模型
-curl http://localhost:8080/v1/models/mimo-auto
+curl http://localhost:8080/v1/models/mimo-v2.5
 ```
 
 模型列表响应格式与 OpenAI 一致：
@@ -120,7 +120,7 @@ curl http://localhost:8080/v1/models/mimo-auto
   "object": "list",
   "data": [
     {
-      "id": "mimo-auto",
+      "id": "mimo-v2.5",
       "object": "model",
       "created": 1715367049,
       "owned_by": "mimo"
