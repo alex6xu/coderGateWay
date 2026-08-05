@@ -262,17 +262,19 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 					accounts.POST("/users", handleCreateUser(accountMgr))
 				}
 
-				admin.GET("/tokens", handleListTokens(database))
-				admin.POST("/tokens", handleCreateToken(database))
+			admin.GET("/tokens", handleListTokens(database))
+			admin.POST("/tokens", handleCreateToken(database))
+			admin.PUT("/tokens/:id", handleUpdateToken(database))
+			admin.DELETE("/tokens/:id", handleDeleteToken(database))
 
 				admin.GET("/route-profiles", handleListRouteProfiles(database))
 				admin.POST("/route-profiles", handleCreateRouteProfile(database))
 				admin.PUT("/route-profiles/:id", handleUpdateRouteProfile(database))
 				admin.DELETE("/route-profiles/:id", handleDeleteRouteProfile(database))
 
-				admin.GET("/request-logs", handleListRequestLogs(database))
-				admin.GET("/request-logs/:id", handleGetRequestLog(database))
-			}
+			admin.GET("/request-logs", handleListRequestLogs(database))
+			admin.GET("/request-logs/:id", handleGetRequestLog(database))
+		}
 		}
 	}
 }

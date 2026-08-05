@@ -418,7 +418,42 @@ func Migrate(db *DB) error {
 		return err
 	}
 
+	if err := ensureClaudeConnectionScopeColumns(db); err != nil {
+		return err
+	}
+
+	if err := ensureClaudeOAuthStateColumns(db); err != nil {
+		return err
+	}
+
 	log.Println("Database migrations completed")
+	return nil
+}
+
+// ensureClaudeOAuthStateColumns adds columns that were introduced to
+// claude_oauth_states after older databases were first created (the table is
+// created with CREATE TABLE IF NOT EXISTS, which never alters an existing table).
+func ensureClaudeOAuthStateColumns(db *DB) error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"code_verifier", "ALTER TABLE claude_oauth_states ADD COLUMN code_verifier TEXT DEFAULT ''"},
+		{"redirect_uri", "ALTER TABLE claude_oauth_states ADD COLUMN redirect_uri TEXT DEFAULT ''"},
+		{"mode", "ALTER TABLE claude_oauth_states ADD COLUMN mode TEXT DEFAULT 'auto'"},
+	} {
+		has, err := tableHasColumn(db, "claude_oauth_states", col.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		log.Printf("Migrating claude_oauth_states: adding %s", col.name)
+		if _, err := db.Exec(col.ddl); err != nil {
+			return fmt.Errorf("failed to add claude_oauth_states.%s: %w", col.name, err)
+		}
+	}
 	return nil
 }
 
@@ -489,6 +524,46 @@ func ensureClaudeConnectionIdentityColumns(db *DB) error {
 		stmt := fmt.Sprintf("ALTER TABLE claude_connections ADD COLUMN %s TEXT DEFAULT ''", col)
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("failed to add claude_connections.%s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+// ensureClaudeConnectionScopeColumns reconciles claude_connections with the
+// current code, which uses columns "scopes" and "subscription_type". Older
+// databases created the table with "scope" (and lacked "subscription_type"),
+// so we rename/extend rather than rely on CREATE TABLE IF NOT EXISTS.
+func ensureClaudeConnectionScopeColumns(db *DB) error {
+	hasScope, err := tableHasColumn(db, "claude_connections", "scope")
+	if err != nil {
+		return err
+	}
+	hasScopes, err := tableHasColumn(db, "claude_connections", "scopes")
+	if err != nil {
+		return err
+	}
+	if hasScope && !hasScopes {
+		log.Println("Migrating claude_connections: renaming scope -> scopes")
+		if _, err := db.Exec("ALTER TABLE claude_connections RENAME COLUMN scope TO scopes"); err != nil {
+			return fmt.Errorf("failed to rename claude_connections.scope: %w", err)
+		}
+		hasScopes = true
+	}
+	if !hasScopes {
+		log.Println("Migrating claude_connections: adding scopes")
+		if _, err := db.Exec("ALTER TABLE claude_connections ADD COLUMN scopes TEXT DEFAULT ''"); err != nil {
+			return fmt.Errorf("failed to add claude_connections.scopes: %w", err)
+		}
+	}
+
+	hasSub, err := tableHasColumn(db, "claude_connections", "subscription_type")
+	if err != nil {
+		return err
+	}
+	if !hasSub {
+		log.Println("Migrating claude_connections: adding subscription_type")
+		if _, err := db.Exec("ALTER TABLE claude_connections ADD COLUMN subscription_type TEXT DEFAULT ''"); err != nil {
+			return fmt.Errorf("failed to add claude_connections.subscription_type: %w", err)
 		}
 	}
 	return nil

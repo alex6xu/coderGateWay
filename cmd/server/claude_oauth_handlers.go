@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ func handleClaudeOAuthStatus(svc *claudeoauth.Service) gin.HandlerFunc {
 		}
 		conn, err := svc.GetConnection(accountID)
 		if err != nil {
+			log.Printf("[claude-oauth-status] GetConnection failed: accountID=%d err=%v", accountID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -275,6 +276,7 @@ func (s *Service) fetchBootstrap(ctx context.Context, accessToken string) *boots
 
 // GetConnection returns connection metadata (without requiring a live token refresh).
 func (s *Service) GetConnection(accountID int64) (*Connection, error) {
+	log.Printf("[claude-oauth] GetConnection called: accountID=%d", accountID)
 	var c Connection
 	var expiresAt, updatedAt sql.NullTime
 	err := s.db.QueryRow(`
@@ -285,6 +287,9 @@ func (s *Service) GetConnection(accountID int64) (*Connection, error) {
 		&c.UserID, &c.AccessToken, &c.RefreshToken, &c.Scopes, &c.SubscriptionType,
 		&c.DeviceID, &c.AccountUUID, &expiresAt, &updatedAt,
 	)
+	if err != nil {
+		log.Printf("[claude-oauth] GetConnection query/scan error: accountID=%d err=%v", accountID, err)
+	}
 	if err == sql.ErrNoRows {
 		return &Connection{UserID: accountID, Connected: false}, nil
 	}

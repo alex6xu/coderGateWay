@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1458,13 +1460,176 @@ func handleGemini(database *db.DB, cfg *config.Config) gin.HandlerFunc {
 
 func handleListTokens(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"tokens": []interface{}{}})
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		rows, err := database.Query(`
+			SELECT id, user_id, name, key, status, expired_at, remain_quota, unlimited_quota,
+			       COALESCE(model_limits, ''), created_at
+			FROM tokens WHERE user_id = ? ORDER BY id DESC
+		`, accountID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query tokens"})
+			return
+		}
+		defer rows.Close()
+
+		tokens := make([]model.Token, 0)
+		for rows.Next() {
+			var t model.Token
+			if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Key, &t.Status, &t.ExpiredAt, &t.RemainQuota, &t.UnlimitedQuota, &t.ModelLimits, &t.CreatedAt); err != nil {
+				continue
+			}
+			// Mask key for list view; the raw key is only returned once on creation.
+			t.Key = maskKey(t.Key)
+			tokens = append(tokens, t)
+		}
+
+		c.JSON(http.StatusOK, gin.H{"tokens": tokens})
 	}
 }
 
 func handleCreateToken(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "token management not implemented yet"})
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			// Default name follows a sequential order 1, 2, 3... per user.
+			var maxName int
+			database.QueryRow(`
+				SELECT COALESCE(MAX(CAST(name AS INTEGER)), 0)
+				FROM tokens WHERE user_id = ? AND name GLOB '[0-9]*'
+			`, accountID).Scan(&maxName)
+			name = strconv.Itoa(maxName + 1)
+		}
+
+		key, err := generateAPIKey()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate api key"})
+			return
+		}
+
+		now := time.Now()
+		result, err := database.Exec(`
+			INSERT INTO tokens (user_id, name, key, status, remain_quota, unlimited_quota, created_at)
+			VALUES (?, ?, ?, 1, -1, 1, ?)
+		`, accountID, name, key, now)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create token"})
+			return
+		}
+
+		id, _ := result.LastInsertId()
+		c.JSON(http.StatusOK, gin.H{"message": "token created", "id": id, "key": key})
+	}
+}
+
+func generateAPIKey() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "sk-" + hex.EncodeToString(b), nil
+}
+
+func handleDeleteToken(database *db.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		tokenID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid token id"})
+			return
+		}
+
+		var owner int64
+		database.QueryRow("SELECT user_id FROM tokens WHERE id = ?", tokenID).Scan(&owner)
+		if owner != accountID {
+			c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
+			return
+		}
+
+		result, err := database.Exec("DELETE FROM tokens WHERE id = ? AND user_id = ?", tokenID, accountID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete token"})
+			return
+		}
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "token deleted"})
+	}
+}
+
+func handleUpdateToken(database *db.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		tokenID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid token id"})
+			return
+		}
+
+		var req struct {
+			Status *int   `json:"status"`
+			Name   *string `json:"name"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		var owner int64
+		database.QueryRow("SELECT user_id FROM tokens WHERE id = ?", tokenID).Scan(&owner)
+		if owner != accountID {
+			c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
+			return
+		}
+
+		query := "UPDATE tokens SET"
+		args := []interface{}{}
+		sep := " "
+		if req.Status != nil {
+			query += sep + "status = ?"
+			args = append(args, *req.Status)
+			sep = ", "
+		}
+		if req.Name != nil && strings.TrimSpace(*req.Name) != "" {
+			query += sep + "name = ?"
+			args = append(args, strings.TrimSpace(*req.Name))
+			sep = ", "
+		}
+		if len(args) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "nothing to update"})
+			return
+		}
+		query += " WHERE id = ? AND user_id = ?"
+		args = append(args, tokenID, accountID)
+
+		if _, err := database.Exec(query, args...); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update token"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "token updated"})
 	}
 }
 
@@ -1545,3 +1710,8 @@ func saveMessage(database *db.DB, accountID int64, sessionID, role, content, mod
 	}
 	return msgID
 }
+
+// ========== Gateway Endpoint Handlers ==========
+
+// (endpoint management now uses the tokens table for API keys;
+// the gateway URL is derived from the running server address)
