@@ -23,11 +23,17 @@ agent:
   # Layout: fixed system → session checkpoint → append-only history → current user
   # (FTS retrieval is attached to the current user message to protect prefix cache)
   context_budget_tokens: 8000
+  context_compact_ratio: 0.75
+  context_target_ratio: 0.55
   history_max_turns: 8
   tool_result_max_chars: 4000
   tool_result_keep_recent: 2
   # Infrequent fold of older turns into checkpoint (advances history cutoff)
   summarize_every_turns: 10
+  # Windowed code tools (Coder mode)
+  read_file_default_lines: 400
+  read_file_max_bytes: 32768
+  grep_max_bytes: 16384
   temperature: 0.7
   prompt_cache_enabled: true
   parallel_readonly_tools: true

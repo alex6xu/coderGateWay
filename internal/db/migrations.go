@@ -151,6 +151,29 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     FOREIGN KEY (channel_id) REFERENCES channels(id)
 );
 
+-- Gateway chat/completions request/response audit log
+CREATE TABLE IF NOT EXISTS gateway_request_logs (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    channel_id INTEGER,
+    channel_name TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    stream INTEGER DEFAULT 0,
+    status_code INTEGER DEFAULT 0,
+    error TEXT DEFAULT '',
+    request_body TEXT DEFAULT '',
+    response_body TEXT DEFAULT '',
+    prompt_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    cached_tokens INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (channel_id) REFERENCES channels(id)
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_request_logs_user_created ON gateway_request_logs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gateway_request_logs_model ON gateway_request_logs(user_id, model);
+
 -- Auth sessions (login tokens)
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token TEXT PRIMARY KEY,

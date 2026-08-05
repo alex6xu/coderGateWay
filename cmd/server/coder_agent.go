@@ -26,14 +26,18 @@ type AgentEvent struct {
 }
 
 type coderOptions struct {
-	Temperature          float64
-	MaxTokens            int
-	MaxIterations        int
-	ToolResultMaxChars   int
-	ParallelReadonly     bool
-	PromptCacheKey       string
-	EnablePromptCache    bool
-	OnEvent              func(AgentEvent)
+	Temperature            float64
+	MaxTokens              int
+	MaxIterations          int
+	ToolResultMaxChars     int
+	ToolResultKeepRecent   int
+	ContextBudgetTokens    int
+	ContextCompactRatio    float64
+	ParallelReadonly       bool
+	PromptCacheKey         string
+	EnablePromptCache      bool
+	ToolLimits             tool.ToolLimits
+	OnEvent                func(AgentEvent)
 }
 
 func runCoderAgent(
@@ -43,7 +47,7 @@ func runCoderAgent(
 	seed []provider.Message,
 	ws *workspace.Workspace,
 	opt coderOptions,
-) (string, provider.Usage, []map[string]string, error) {
+) (string, provider.Usage, []map[string]string, bool, error) {
 	if opt.MaxIterations <= 0 {
 		opt.MaxIterations = 8
 	}
@@ -51,17 +55,19 @@ func runCoderAgent(
 		opt.MaxTokens = 4096
 	}
 
-	registry := tool.NewChrootedRegistry(ws.RootPath)
+	registry := tool.NewChrootedRegistry(ws.RootPath, opt.ToolLimits)
 	tools := toProviderTools(registry)
+	toolsCost := promptctx.EstimateToolsSchema(tools)
 
 	messages := make([]provider.Message, len(seed))
 	copy(messages, seed)
 	if len(messages) == 0 {
-		return "", provider.Usage{}, nil, fmt.Errorf("empty coder seed messages")
+		return "", provider.Usage{}, nil, false, fmt.Errorf("empty coder seed messages")
 	}
 
 	var usage provider.Usage
 	var steps []map[string]string
+	didCompact := false
 	emit := func(ev AgentEvent) {
 		if opt.OnEvent != nil {
 			opt.OnEvent(ev)
@@ -69,6 +75,22 @@ func runCoderAgent(
 	}
 
 	for i := 0; i < opt.MaxIterations; i++ {
+		compacted, berr := promptctx.EnsureWithinBudget(
+			messages,
+			opt.ContextBudgetTokens,
+			opt.ContextCompactRatio,
+			opt.ToolResultKeepRecent,
+			opt.ToolResultMaxChars,
+			toolsCost,
+		)
+		if compacted {
+			didCompact = true
+		}
+		if berr != nil {
+			emit(AgentEvent{Type: "error", Content: berr.Error()})
+			return "", usage, steps, didCompact, berr
+		}
+
 		temp := opt.Temperature
 		mt := opt.MaxTokens
 		req := &provider.ChatCompletionRequest{
@@ -85,7 +107,7 @@ func runCoderAgent(
 		resp, err := prov.ChatCompletion(ctx, req)
 		if err != nil {
 			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return "", usage, steps, err
+			return "", usage, steps, didCompact, err
 		}
 
 		usage.Add(resp.Usage)
@@ -93,7 +115,7 @@ func runCoderAgent(
 		if len(resp.Choices) == 0 {
 			err := fmt.Errorf("empty model response")
 			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return "", usage, steps, err
+			return "", usage, steps, didCompact, err
 		}
 
 		msg := resp.Choices[0].Message
@@ -101,7 +123,7 @@ func runCoderAgent(
 			if msg.Content != "" {
 				emit(AgentEvent{Type: "delta", Content: msg.Content})
 			}
-			return msg.Content, usage, steps, nil
+			return msg.Content, usage, steps, didCompact, nil
 		}
 
 		messages = append(messages, msg)
@@ -113,7 +135,7 @@ func runCoderAgent(
 
 	err := fmt.Errorf("max tool iterations reached; try a more specific request")
 	emit(AgentEvent{Type: "error", Content: err.Error()})
-	return "", usage, steps, err
+	return "", usage, steps, didCompact, err
 }
 
 func executeToolCalls(
@@ -237,9 +259,11 @@ func coderSystemPrompt(modelName, workspaceName string) string {
 	return fmt.Sprintf(
 		"You are CodeGateway Coder, an expert software engineering agent powered by %s working inside a cloud workspace.\n"+
 			"Project: %s (treat paths as relative to project root).\n"+
-			"Use tools to explore and edit files. Prefer read_file / list_directory / grep / search_files before writing.\n"+
-			"When reading large files, use offset/limit line ranges.\n"+
+			"Explore with list_directory / grep / search_files first, then read_file in small windows.\n"+
+			"Never dump whole large files: always pass offset/limit; continue with a later offset if needed.\n"+
+			"Prefer read_file / list_directory / grep / search_files before writing.\n"+
 			"When changing code, use write_file with complete file contents for the files you modify.\n"+
+			"Batch large edits by file; keep only relevant snippets in context.\n"+
 			"After edits, briefly summarize what changed and how to verify.\n"+
 			"Do not attempt to access paths outside the project.\n"+
 			"Use retrieved memory and prior chat turns when relevant; prefer concise tool usage to save tokens.",

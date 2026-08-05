@@ -74,10 +74,15 @@ type AgentConfig struct {
 	MaxIterations          int          `yaml:"max_iterations"`
 	MaxTokens              int          `yaml:"max_tokens"` // completion / generation cap
 	ContextBudgetTokens    int          `yaml:"context_budget_tokens"`
+	ContextCompactRatio    float64      `yaml:"context_compact_ratio"` // trigger compaction (default 0.75)
+	ContextTargetRatio     float64      `yaml:"context_target_ratio"`  // soft target after compact (default 0.55)
 	HistoryMaxTurns        int          `yaml:"history_max_turns"`
 	ToolResultMaxChars     int          `yaml:"tool_result_max_chars"`
 	ToolResultKeepRecent   int          `yaml:"tool_result_keep_recent"`
 	SummarizeEveryTurns    int          `yaml:"summarize_every_turns"`
+	ReadFileDefaultLines   int          `yaml:"read_file_default_lines"`
+	ReadFileMaxBytes       int          `yaml:"read_file_max_bytes"`
+	GrepMaxBytes           int          `yaml:"grep_max_bytes"`
 	Temperature            float64      `yaml:"temperature"`
 	PromptCacheEnabled     bool         `yaml:"prompt_cache_enabled"`
 	ParallelReadonlyTools  bool         `yaml:"parallel_readonly_tools"`
@@ -317,10 +322,15 @@ func defaultConfig() *Config {
 			MaxIterations:         50,
 			MaxTokens:             4096,
 			ContextBudgetTokens:   8000,
+			ContextCompactRatio:   0.75,
+			ContextTargetRatio:    0.55,
 			HistoryMaxTurns:       8,
 			ToolResultMaxChars:    4000,
 			ToolResultKeepRecent:  2,
 			SummarizeEveryTurns:   10,
+			ReadFileDefaultLines:  400,
+			ReadFileMaxBytes:      32768,
+			GrepMaxBytes:          16384,
 			Temperature:           0.7,
 			PromptCacheEnabled:    true,
 			ParallelReadonlyTools: true,

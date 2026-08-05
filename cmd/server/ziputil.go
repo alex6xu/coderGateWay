@@ -37,6 +37,14 @@ func unzipInto(zipPath, dest string) error {
 		if name == "" || strings.HasPrefix(name, "__MACOSX/") {
 			continue
 		}
+		// Skip hidden files/dirs (any path segment starting with '.').
+		if zipPathHasHiddenSegment(name) {
+			continue
+		}
+		// Skip oversized entries (>3MB) as a server-side guard matching the frontend.
+		if !f.FileInfo().IsDir() && f.UncompressedSize64 > 3<<20 {
+			continue
+		}
 		target := filepath.Join(destAbs, filepath.FromSlash(name))
 		targetAbs, err := filepath.Abs(target)
 		if err != nil {
@@ -73,4 +81,16 @@ func unzipInto(zipPath, dest string) error {
 		}
 	}
 	return nil
+}
+
+func zipPathHasHiddenSegment(name string) bool {
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || part == "." || part == ".." {
+			continue
+		}
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
 }

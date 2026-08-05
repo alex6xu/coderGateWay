@@ -303,24 +303,12 @@ export default function CoderPage() {
     setUploading(true)
     setUploadError('')
     try {
-      const form = new FormData()
-      const firstRel = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath || files[0].name
-      const top = firstRel.split('/')[0] || 'project'
-      form.append('name', top)
+      const { buildWorkspaceZipFromDirectory, formatUploadSkipSummary } = await import('../lib/workspaceUpload')
+      const built = await buildWorkspaceZipFromDirectory(files)
 
-      let count = 0
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i] as File & { webkitRelativePath?: string }
-        const rel = file.webkitRelativePath || file.name
-        if (!rel || rel.includes('node_modules/') || rel.includes('/.git/') || rel.startsWith('.git/')) continue
-        form.append('files', file, rel)
-        count++
-        if (count >= 5000) break
-      }
-      if (count === 0) {
-        setUploadError('目录为空或被过滤（如 node_modules/.git）')
-        return
-      }
+      const form = new FormData()
+      form.append('name', built.name)
+      form.append('archive', built.blob, `${built.name}.zip`)
 
       const token = localStorage.getItem('codegateway_auth_token')
       const headers: Record<string, string> = {}
@@ -340,19 +328,20 @@ export default function CoderPage() {
       await fetchWorkspaces()
       if (data.workspace?.id) {
         setWorkspaceId(data.workspace.id)
+        const skipHint = formatUploadSkipSummary(built)
         setMessages((prev) => [
           ...prev,
           {
             id: Date.now().toString(),
             role: 'system',
-            content: `已上传云端工作区「${data.workspace.name}」（${data.workspace.file_count} 个文件，${formatBytes(data.workspace.size_bytes)}）。现在可以直接描述要改的功能，Agent 会在云端目录里读改文件。`,
+            content: `已上传云端工作区「${data.workspace.name}」（${data.workspace.file_count} 个文件，${formatBytes(data.workspace.size_bytes)}；本地打包 ${built.included} 个文件${skipHint}）。现在可以直接描述要改的功能，Agent 会在云端目录里读改文件。`,
             timestamp: new Date(),
           },
         ])
       }
     } catch (error) {
       console.error(error)
-      setUploadError('上传失败，请重试')
+      setUploadError(error instanceof Error ? error.message : '上传失败，请重试')
     } finally {
       setUploading(false)
       if (dirInputRef.current) dirInputRef.current.value = ''
@@ -609,8 +598,11 @@ export default function CoderPage() {
           disabled={uploading}
           className="h-8 px-3 text-[12px] bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
         >
-          {uploading ? '上传中…' : '选择本地目录并上传云端'}
+          {uploading ? '打包上传中…' : '选择本地目录并上传云端'}
         </button>
+        <span className="text-[11px] text-muted-foreground">
+          自动跳过隐藏文件与超过 3MB 的文件，压缩后上传
+        </span>
         <button
           onClick={() => {
             if (ghConnected) openGitHubPanel()

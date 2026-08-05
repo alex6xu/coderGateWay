@@ -149,6 +149,47 @@ func TestCompactToolMessages(t *testing.T) {
 	}
 }
 
+func TestEnsureWithinBudgetCompacts(t *testing.T) {
+	big := string(make([]byte, 8000))
+	msgs := []provider.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u"},
+		{Role: "assistant", Content: "a", ToolCalls: []provider.ToolCall{{ID: "1", Function: provider.ToolFunction{Name: "read_file"}}}},
+		{Role: "tool", Content: big, ToolCallID: "1"},
+		{Role: "assistant", Content: "a2", ToolCalls: []provider.ToolCall{{ID: "2", Function: provider.ToolFunction{Name: "read_file"}}}},
+		{Role: "tool", Content: big, ToolCallID: "2"},
+		{Role: "assistant", Content: "a3", ToolCalls: []provider.ToolCall{{ID: "3", Function: provider.ToolFunction{Name: "read_file"}}}},
+		{Role: "tool", Content: big, ToolCallID: "3"},
+	}
+	before := EstimateMessages(msgs)
+	compacted, err := EnsureWithinBudget(msgs, 3000, 0.75, 1, 500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compacted {
+		t.Fatal("expected compaction")
+	}
+	after := EstimateMessages(msgs)
+	if after >= before {
+		t.Fatalf("expected token drop: before=%d after=%d", before, after)
+	}
+	if len(msgs[3].Content) >= 8000 {
+		t.Fatal("older tool result should be compacted")
+	}
+}
+
+func TestEnsureWithinBudgetErrorsWhenStillOver(t *testing.T) {
+	// Single huge non-tool message cannot be compacted by CompactToolMessages.
+	msgs := []provider.Message{
+		{Role: "system", Content: string(make([]byte, 20000))},
+		{Role: "user", Content: "hi"},
+	}
+	_, err := EnsureWithinBudget(msgs, 1000, 0.75, 2, 4000, 0)
+	if err == nil {
+		t.Fatal("expected budget exceeded error")
+	}
+}
+
 func TestSanitizeAndCheckpointCutoff(t *testing.T) {
 	q := memory.SanitizeFTSQuery("login!!! rate-limit 限流 API")
 	if q == "" {

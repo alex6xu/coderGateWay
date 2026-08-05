@@ -254,6 +254,8 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				admin.PUT("/route-profiles/:id", handleUpdateRouteProfile(database))
 				admin.DELETE("/route-profiles/:id", handleDeleteRouteProfile(database))
 
+				admin.GET("/request-logs", handleListRequestLogs(database))
+				admin.GET("/request-logs/:id", handleGetRequestLog(database))
 			}
 		}
 	}

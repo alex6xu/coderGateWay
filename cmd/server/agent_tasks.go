@@ -12,6 +12,7 @@ import (
 	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/gateway/profile"
 	"github.com/alex/codegateway/internal/provider"
+	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 )
@@ -127,16 +128,24 @@ func newAgentTaskWorker(database *db.DB, workspaceMgr *workspace.Manager, cfg *c
 			return resolveAgentTaskProvider(database, task.UserID, task.RouteProfileID)
 		},
 		Run: func(ctx context.Context, prov provider.Provider, modelName, systemPrompt, prompt string, ws *workspace.Workspace) (string, []map[string]string, error) {
-			result, _, steps, err := runCoderAgent(ctx, prov, modelName, []provider.Message{
+			result, _, steps, _, err := runCoderAgent(ctx, prov, modelName, []provider.Message{
 				{Role: "system", Content: systemPrompt},
 				{Role: "user", Content: prompt},
 			}, ws, coderOptions{
-				Temperature:        cfg.Agent.Temperature,
-				MaxTokens:          cfg.Agent.MaxTokens,
-				MaxIterations:      cfg.Agent.MaxIterations,
-				ToolResultMaxChars: cfg.Agent.ToolResultMaxChars,
-				ParallelReadonly:   cfg.Agent.ParallelReadonlyTools,
-				EnablePromptCache:  cfg.Agent.PromptCacheEnabled,
+				Temperature:            cfg.Agent.Temperature,
+				MaxTokens:              cfg.Agent.MaxTokens,
+				MaxIterations:          cfg.Agent.MaxIterations,
+				ToolResultMaxChars:     cfg.Agent.ToolResultMaxChars,
+				ToolResultKeepRecent:   cfg.Agent.ToolResultKeepRecent,
+				ContextBudgetTokens:    cfg.Agent.ContextBudgetTokens,
+				ContextCompactRatio:    cfg.Agent.ContextCompactRatio,
+				ParallelReadonly:       cfg.Agent.ParallelReadonlyTools,
+				EnablePromptCache:      cfg.Agent.PromptCacheEnabled,
+				ToolLimits: tool.ToolLimits{
+					ReadFileDefaultLines: cfg.Agent.ReadFileDefaultLines,
+					ReadFileMaxBytes:     cfg.Agent.ReadFileMaxBytes,
+					GrepMaxBytes:         cfg.Agent.GrepMaxBytes,
+				},
 			})
 			return result, steps, err
 		},

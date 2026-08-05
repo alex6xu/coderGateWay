@@ -10,15 +10,40 @@ import (
 	"strings"
 )
 
+// ToolLimits caps tool outputs so Coder context stays within budget.
+type ToolLimits struct {
+	ReadFileDefaultLines int
+	ReadFileMaxBytes     int
+	GrepMaxBytes         int
+}
+
+func (l ToolLimits) withDefaults() ToolLimits {
+	if l.ReadFileDefaultLines <= 0 {
+		l.ReadFileDefaultLines = 400
+	}
+	if l.ReadFileMaxBytes <= 0 {
+		l.ReadFileMaxBytes = 32 << 10
+	}
+	if l.GrepMaxBytes <= 0 {
+		l.GrepMaxBytes = 16 << 10
+	}
+	return l
+}
+
 // NewChrootedRegistry creates tools restricted to rootDir.
-func NewChrootedRegistry(rootDir string) *ToolRegistry {
+// Optional limits zero-values mean package defaults (400 lines / 32KB / 16KB).
+func NewChrootedRegistry(rootDir string, limits ...ToolLimits) *ToolRegistry {
 	r := &ToolRegistry{tools: make(map[string]*Tool)}
 	rootDir, _ = filepath.Abs(rootDir)
-	r.registerChrootedTools(rootDir)
+	lim := ToolLimits{}
+	if len(limits) > 0 {
+		lim = limits[0]
+	}
+	r.registerChrootedTools(rootDir, lim.withDefaults())
 	return r
 }
 
-func (r *ToolRegistry) registerChrootedTools(root string) {
+func (r *ToolRegistry) registerChrootedTools(root string, limits ToolLimits) {
 	resolve := func(rel string) (string, error) {
 		if strings.TrimSpace(rel) == "" || rel == "." {
 			return root, nil
@@ -81,8 +106,12 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 	})
 
 	r.Register(&Tool{
-		Name:        "read_file",
-		Description: "Read a text file relative to the project root. Optional offset/limit select 1-based line ranges.",
+		Name: "read_file",
+		Description: fmt.Sprintf(
+			"Read a text file relative to the project root. Prefer offset/limit for large files. "+
+				"Default window is %d lines / %d bytes max when limit is omitted.",
+			limits.ReadFileDefaultLines, limits.ReadFileMaxBytes,
+		),
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -96,7 +125,7 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 				},
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Max number of lines to return (optional)",
+					"description": "Max number of lines to return (optional; defaults to a small window)",
 				},
 			},
 			"required": []string{"path"},
@@ -112,33 +141,39 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 				return "", err
 			}
 			text := string(data)
+			lines := strings.Split(text, "\n")
 			offset := intFromArg(args["offset"], 0)
 			limit := intFromArg(args["limit"], 0)
-			if offset > 0 || limit > 0 {
-				lines := strings.Split(text, "\n")
-				start := 0
-				if offset > 0 {
-					start = offset - 1
-					if start < 0 {
-						start = 0
-					}
-					if start > len(lines) {
-						start = len(lines)
-					}
+			if limit <= 0 {
+				limit = limits.ReadFileDefaultLines
+			}
+			if limit > 800 {
+				limit = 800
+			}
+			start := 0
+			if offset > 0 {
+				start = offset - 1
+				if start < 0 {
+					start = 0
 				}
-				end := len(lines)
-				if limit > 0 && start+limit < end {
-					end = start + limit
-				}
-				text = strings.Join(lines[start:end], "\n")
-				if end < len(lines) {
-					text += fmt.Sprintf("\n…[%d more lines]", len(lines)-end)
+				if start > len(lines) {
+					start = len(lines)
 				}
 			}
-			if len(text) > 200_000 {
-				return text[:200_000] + "\n...[truncated]", nil
+			end := start + limit
+			if end > len(lines) {
+				end = len(lines)
 			}
-			return text, nil
+			out := strings.Join(lines[start:end], "\n")
+			header := fmt.Sprintf("# %s lines %d-%d of %d\n", relDisplay(abs), start+1, end, len(lines))
+			if end < len(lines) {
+				out += fmt.Sprintf("\n…[%d more lines; pass offset/limit to continue]", len(lines)-end)
+			}
+			out = header + out
+			if len(out) > limits.ReadFileMaxBytes {
+				return out[:limits.ReadFileMaxBytes] + "\n…[truncated to read_file_max_bytes]", nil
+			}
+			return out, nil
 		},
 	})
 
@@ -206,7 +241,6 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 				if !ok {
 					ok, _ = filepath.Match(pattern, filepath.Base(rel))
 				}
-				// Support simple **/*.ext by matching suffix
 				if !ok && strings.HasPrefix(pattern, "**/") {
 					ok, _ = filepath.Match(strings.TrimPrefix(pattern, "**/"), filepath.Base(rel))
 				}
@@ -230,7 +264,7 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 
 	r.Register(&Tool{
 		Name:        "grep",
-		Description: "Search file contents with a regex/string under the project.",
+		Description: "Search file contents with a regex/string under the project. Output is capped for context budget.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -266,8 +300,8 @@ func (r *ToolRegistry) registerChrootedTools(root string) {
 			}
 			text := string(out)
 			text = strings.ReplaceAll(text, root+string(os.PathSeparator), "")
-			if len(text) > 50_000 {
-				return text[:50_000] + "\n...[truncated]", nil
+			if len(text) > limits.GrepMaxBytes {
+				return text[:limits.GrepMaxBytes] + "\n…[truncated to grep_max_bytes]", nil
 			}
 			return text, nil
 		},

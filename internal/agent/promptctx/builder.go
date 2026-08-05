@@ -3,6 +3,7 @@ package promptctx
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -12,6 +13,9 @@ import (
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/provider"
 )
+
+// ErrContextBudgetExceeded is returned when messages still exceed 95% of budget after compaction.
+var ErrContextBudgetExceeded = errors.New("context budget exceeded after compaction; narrow the request or start a new session")
 
 // Options controls context assembly.
 type Options struct {
@@ -334,6 +338,11 @@ func loadHistory(db *sql.DB, sessionID, excludeID, afterID string, limit int) []
 // MaybeCheckpoint writes an extractive session summary and advances the history
 // cutoff so subsequent Builds keep an append-only suffix (prefix-cache friendly).
 func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, every int) {
+	MaybeCheckpointEx(db, mem, sessionID, every, false)
+}
+
+// MaybeCheckpointEx is like MaybeCheckpoint but can force a fold after compaction.
+func MaybeCheckpointEx(db *sql.DB, mem *memory.MemoryService, sessionID string, every int, force bool) {
 	if mem == nil || sessionID == "" || db == nil {
 		return
 	}
@@ -344,7 +353,11 @@ func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, ev
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count); err != nil {
 		return
 	}
-	if count < every || count%every > 1 {
+	if !force {
+		if count < every || count%every > 1 {
+			return
+		}
+	} else if count < 4 {
 		return
 	}
 
@@ -352,7 +365,11 @@ func MaybeCheckpoint(db *sql.DB, mem *memory.MemoryService, sessionID string, ev
 	if cp, err := mem.GetSessionCheckpoint(sessionID); err == nil && cp != nil {
 		cutoffID = cp.AfterMsgID
 	}
-	history := loadHistory(db, sessionID, "", cutoffID, every*3)
+	fetch := every * 3
+	if fetch < 12 {
+		fetch = 12
+	}
+	history := loadHistory(db, sessionID, "", cutoffID, fetch)
 	if len(history) < 4 {
 		return
 	}
@@ -412,6 +429,39 @@ func CompactToolMessages(messages []provider.Message, keepRecent, maxChars int) 
 			messages[i].Content = TruncateToolResult(content, maxChars)
 		}
 	}
+}
+
+// EstimateMessages roughly estimates tokens for an in-flight message list.
+func EstimateMessages(messages []provider.Message) int {
+	n := 0
+	for _, m := range messages {
+		n += EstimateTokens(m.Content) + 4
+		for _, tc := range m.ToolCalls {
+			n += EstimateTokens(tc.Function.Name) + EstimateTokens(tc.Function.Arguments) + 8
+		}
+	}
+	return n
+}
+
+// EnsureWithinBudget compacts older tool results when utilization reaches compactRatio.
+// If usage is still above 95% of budget after compaction, it returns ErrContextBudgetExceeded.
+func EnsureWithinBudget(messages []provider.Message, budget int, compactRatio float64, keepRecent, maxChars, toolsCost int) (compacted bool, err error) {
+	if budget <= 0 {
+		budget = 8000
+	}
+	if compactRatio <= 0 {
+		compactRatio = 0.75
+	}
+	used := EstimateMessages(messages) + toolsCost
+	if float64(used) < float64(budget)*compactRatio {
+		return false, nil
+	}
+	CompactToolMessages(messages, keepRecent, maxChars)
+	used = EstimateMessages(messages) + toolsCost
+	if float64(used) > float64(budget)*0.95 {
+		return true, ErrContextBudgetExceeded
+	}
+	return true, nil
 }
 
 func truncateRunes(s string, max int) string {

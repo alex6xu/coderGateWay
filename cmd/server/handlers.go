@@ -8,18 +8,20 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/alex/codegateway/internal/config"
-	"github.com/alex/codegateway/internal/db"
-	"github.com/alex/codegateway/internal/gateway/profile"
-	"github.com/alex/codegateway/internal/model"
-	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/agent/memory"
 	"github.com/alex/codegateway/internal/agent/promptctx"
 	"github.com/alex/codegateway/internal/agent/tags"
+	"github.com/alex/codegateway/internal/config"
+	"github.com/alex/codegateway/internal/db"
+	"github.com/alex/codegateway/internal/gateway/profile"
+	"github.com/alex/codegateway/internal/gatewaylog"
+	"github.com/alex/codegateway/internal/model"
+	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
@@ -375,9 +377,20 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 			return
 		}
+		requestJSON := gatewaylog.MarshalRequestJSON(req)
+		started := time.Now()
 
 		candidates, err := resolveChatCompletionCandidates(database, accountID, req.Model)
 		if err != nil {
+			saveGatewayRequestLog(database, &gatewaylog.Entry{
+				UserID:      accountID,
+				Model:       req.Model,
+				Stream:      req.Stream,
+				StatusCode:  http.StatusServiceUnavailable,
+				Error:       "no available channel for model: " + req.Model,
+				RequestBody: requestJSON,
+				LatencyMs:   time.Since(started).Milliseconds(),
+			})
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel for model: " + req.Model})
 			return
 		}
@@ -389,24 +402,80 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			log.Printf("[chat] account=%d model=%s channel=%s(type=%d) stream=true", accountID, req.Model, selected.channel.Name, selected.channel.Type)
 			prov, err := createProviderFromChannel(selected.channel)
 			if err != nil {
+				saveGatewayRequestLog(database, &gatewaylog.Entry{
+					UserID:      accountID,
+					ChannelID:   selected.channel.ID,
+					ChannelName: selected.channel.Name,
+					Model:       selected.model,
+					Stream:      true,
+					StatusCode:  http.StatusInternalServerError,
+					Error:       err.Error(),
+					RequestBody: requestJSON,
+					LatencyMs:   time.Since(started).Milliseconds(),
+				})
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-			handleStreamResponse(c, prov, &req)
+			handleStreamResponse(c, database, accountID, selected, prov, &req, requestJSON, started)
 			return
 		}
 
 		resp, selected, err := completeWithCandidates(c.Request.Context(), candidates, &req, createProviderFromChannel)
+		latency := time.Since(started).Milliseconds()
 		if err != nil {
+			chID, chName, modelName := int64(0), "", req.Model
+			if selected.channel != nil {
+				chID = selected.channel.ID
+				chName = selected.channel.Name
+			}
+			if selected.model != "" {
+				modelName = selected.model
+			}
+			saveGatewayRequestLog(database, &gatewaylog.Entry{
+				UserID:      accountID,
+				ChannelID:   chID,
+				ChannelName: chName,
+				Model:       modelName,
+				Stream:      false,
+				StatusCode:  http.StatusInternalServerError,
+				Error:       err.Error(),
+				RequestBody: requestJSON,
+				LatencyMs:   latency,
+			})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		resp.Usage.Normalize()
 
+		respJSON, _ := json.Marshal(resp)
+		saveGatewayRequestLog(database, &gatewaylog.Entry{
+			UserID:           accountID,
+			ChannelID:        selected.channel.ID,
+			ChannelName:      selected.channel.Name,
+			Model:            selected.model,
+			Stream:           false,
+			StatusCode:       http.StatusOK,
+			RequestBody:      requestJSON,
+			ResponseBody:     string(respJSON),
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			CachedTokens:     resp.Usage.CachedTokens,
+			LatencyMs:        latency,
+		})
+
 		// Log usage
 		logUsage(database, accountID, selected.channel, selected.model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
 
 		c.JSON(http.StatusOK, resp)
+	}
+}
+
+func saveGatewayRequestLog(database *db.DB, entry *gatewaylog.Entry) {
+	if database == nil || entry == nil {
+		return
+	}
+	if err := gatewayLogStore(database).Insert(entry); err != nil {
+		log.Printf("[gatewaylog] insert failed: %v", err)
 	}
 }
 
@@ -554,24 +623,57 @@ func timeUntilNearestCooldown(candidates []chatCompletionCandidate) time.Duratio
 	return nearest
 }
 
-func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.ChatCompletionRequest) {
+func handleStreamResponse(
+	c *gin.Context,
+	database *db.DB,
+	accountID int64,
+	selected chatCompletionCandidate,
+	prov provider.Provider,
+	req *provider.ChatCompletionRequest,
+	requestJSON string,
+	started time.Time,
+) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
+		saveGatewayRequestLog(database, &gatewaylog.Entry{
+			UserID:      accountID,
+			ChannelID:   selected.channel.ID,
+			ChannelName: selected.channel.Name,
+			Model:       selected.model,
+			Stream:      true,
+			StatusCode:  http.StatusInternalServerError,
+			Error:       "streaming not supported",
+			RequestBody: requestJSON,
+			LatencyMs:   time.Since(started).Milliseconds(),
+		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
 		return
 	}
 
 	chunks, err := prov.ChatCompletionStream(c.Request.Context(), req)
 	if err != nil {
+		saveGatewayRequestLog(database, &gatewaylog.Entry{
+			UserID:      accountID,
+			ChannelID:   selected.channel.ID,
+			ChannelName: selected.channel.Name,
+			Model:       selected.model,
+			Stream:      true,
+			StatusCode:  http.StatusInternalServerError,
+			Error:       err.Error(),
+			RequestBody: requestJSON,
+			LatencyMs:   time.Since(started).Milliseconds(),
+		})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	agg := streamAggregator{model: selected.model}
 	for chunk := range chunks {
+		agg.consume(chunk)
 		data, err := json.Marshal(chunk)
 		if err != nil {
 			continue
@@ -582,6 +684,120 @@ func handleStreamResponse(c *gin.Context, prov provider.Provider, req *provider.
 
 	fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 	flusher.Flush()
+
+	resp := agg.toResponse()
+	respJSON, _ := json.Marshal(resp)
+	saveGatewayRequestLog(database, &gatewaylog.Entry{
+		UserID:           accountID,
+		ChannelID:        selected.channel.ID,
+		ChannelName:      selected.channel.Name,
+		Model:            selected.model,
+		Stream:           true,
+		StatusCode:       http.StatusOK,
+		RequestBody:      requestJSON,
+		ResponseBody:     string(respJSON),
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		CachedTokens:     resp.Usage.CachedTokens,
+		LatencyMs:        time.Since(started).Milliseconds(),
+	})
+	logUsage(database, accountID, selected.channel, selected.model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedTokens)
+}
+
+// streamAggregator rebuilds an OpenAI-compatible completion from SSE chunks for audit logs.
+type streamAggregator struct {
+	id           string
+	model        string
+	role         string
+	content      strings.Builder
+	toolCalls    map[int]*provider.ToolCall
+	finishReason string
+	usage        provider.Usage
+}
+
+func (a *streamAggregator) consume(chunk *provider.ChatCompletionChunk) {
+	if chunk == nil {
+		return
+	}
+	if chunk.ID != "" {
+		a.id = chunk.ID
+	}
+	if chunk.Model != "" {
+		a.model = chunk.Model
+	}
+	if chunk.Usage != nil {
+		a.usage.Add(*chunk.Usage)
+	}
+	if len(chunk.Choices) == 0 {
+		return
+	}
+	ch := chunk.Choices[0]
+	if ch.FinishReason != nil && *ch.FinishReason != "" {
+		a.finishReason = *ch.FinishReason
+	}
+	if ch.Delta.Role != "" {
+		a.role = ch.Delta.Role
+	}
+	if ch.Delta.Content != "" {
+		a.content.WriteString(ch.Delta.Content)
+	}
+	for _, tc := range ch.Delta.ToolCalls {
+		idx := 0
+		if tc.Index != nil {
+			idx = *tc.Index
+		}
+		if a.toolCalls == nil {
+			a.toolCalls = map[int]*provider.ToolCall{}
+		}
+		cur, ok := a.toolCalls[idx]
+		if !ok {
+			cp := tc
+			cp.Index = nil
+			a.toolCalls[idx] = &cp
+			continue
+		}
+		if tc.ID != "" {
+			cur.ID = tc.ID
+		}
+		if tc.Type != "" {
+			cur.Type = tc.Type
+		}
+		if tc.Function.Name != "" {
+			cur.Function.Name = tc.Function.Name
+		}
+		if tc.Function.Arguments != "" {
+			cur.Function.Arguments += tc.Function.Arguments
+		}
+	}
+}
+
+func (a *streamAggregator) toResponse() *provider.ChatCompletionResponse {
+	msg := provider.Message{Role: a.role, Content: a.content.String()}
+	if msg.Role == "" {
+		msg.Role = "assistant"
+	}
+	if len(a.toolCalls) > 0 {
+		keys := make([]int, 0, len(a.toolCalls))
+		for k := range a.toolCalls {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		for _, k := range keys {
+			msg.ToolCalls = append(msg.ToolCalls, *a.toolCalls[k])
+		}
+	}
+	finish := a.finishReason
+	if finish == "" {
+		finish = "stop"
+	}
+	a.usage.Normalize()
+	return &provider.ChatCompletionResponse{
+		ID:      a.id,
+		Object:  "chat.completion",
+		Model:   a.model,
+		Choices: []provider.Choice{{Index: 0, Message: msg, FinishReason: finish}},
+		Usage:   a.usage,
+	}
 }
 
 // ========== Agent Chat Handler ==========
@@ -710,6 +926,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		responseContent := ""
 		var usage provider.Usage
 		var toolSteps []map[string]string
+		forceCheckpoint := false
 
 		extraPrefix := ""
 		system := chatSystemPrompt(modelName, mode)
@@ -744,7 +961,12 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				_ = mem.UpsertProjectMemory(ws.ID, "Workspace "+ws.Name+" files:\n"+hintOrEmpty(tree, hintLimit))
 			}
 
-			registry := tool.NewChrootedRegistry(ws.RootPath)
+			toolLimits := tool.ToolLimits{
+				ReadFileDefaultLines: cfg.Agent.ReadFileDefaultLines,
+				ReadFileMaxBytes:     cfg.Agent.ReadFileMaxBytes,
+				GrepMaxBytes:         cfg.Agent.GrepMaxBytes,
+			}
+			registry := tool.NewChrootedRegistry(ws.RootPath, toolLimits)
 			toolsCost = promptctx.EstimateToolsSchema(toProviderTools(registry))
 
 			seed := promptctx.Build(database.DB, promptctx.Options{
@@ -759,23 +981,29 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				ToolsSchemaCost: toolsCost,
 			})
 
-			responseContent, usage, toolSteps, err = runCoderAgent(
+			var compacted bool
+			responseContent, usage, toolSteps, compacted, err = runCoderAgent(
 				c.Request.Context(),
 				prov,
 				modelName,
 				seed,
 				ws,
 				coderOptions{
-					Temperature:        temperature,
-					MaxTokens:          maxTokens,
-					MaxIterations:      cfg.Agent.MaxIterations,
-					ToolResultMaxChars: cfg.Agent.ToolResultMaxChars,
-					ParallelReadonly:   cfg.Agent.ParallelReadonlyTools,
-					PromptCacheKey:     "cg-session-" + sessionID,
-					EnablePromptCache:  cfg.Agent.PromptCacheEnabled,
-					OnEvent:            emit,
+					Temperature:          temperature,
+					MaxTokens:            maxTokens,
+					MaxIterations:        cfg.Agent.MaxIterations,
+					ToolResultMaxChars:   cfg.Agent.ToolResultMaxChars,
+					ToolResultKeepRecent: cfg.Agent.ToolResultKeepRecent,
+					ContextBudgetTokens:  cfg.Agent.ContextBudgetTokens,
+					ContextCompactRatio:  cfg.Agent.ContextCompactRatio,
+					ParallelReadonly:     cfg.Agent.ParallelReadonlyTools,
+					PromptCacheKey:       "cg-session-" + sessionID,
+					EnablePromptCache:    cfg.Agent.PromptCacheEnabled,
+					ToolLimits:           toolLimits,
+					OnEvent:              emit,
 				},
 			)
+			forceCheckpoint = compacted
 			_ = workspaceMgr.RefreshStats(ws)
 		} else {
 			messages := promptctx.Build(database.DB, promptctx.Options{
@@ -851,7 +1079,7 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		`, time.Now(), sessionID)
 
 		if cfg.Agent.MemoryConfig.Enabled && mem != nil {
-			promptctx.MaybeCheckpoint(database.DB, mem, sessionID, cfg.Agent.SummarizeEveryTurns)
+			promptctx.MaybeCheckpointEx(database.DB, mem, sessionID, cfg.Agent.SummarizeEveryTurns, forceCheckpoint)
 		}
 
 		logUsage(database, accountID, channel, modelName, usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
