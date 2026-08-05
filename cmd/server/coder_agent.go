@@ -38,6 +38,10 @@ type coderOptions struct {
 	EnablePromptCache      bool
 	ToolLimits             tool.ToolLimits
 	OnEvent                func(AgentEvent)
+	// InjectPending is called before each LLM request (after tools) to append mid-run user context.
+	InjectPending func() []provider.Message
+	// ShouldCancel returns true when the durable run was cancelled.
+	ShouldCancel func() bool
 }
 
 func runCoderAgent(
@@ -75,6 +79,17 @@ func runCoderAgent(
 	}
 
 	for i := 0; i < opt.MaxIterations; i++ {
+		if opt.ShouldCancel != nil && opt.ShouldCancel() {
+			err := fmt.Errorf("cancelled")
+			emit(AgentEvent{Type: "error", Content: err.Error()})
+			return "", usage, steps, didCompact, err
+		}
+		if opt.InjectPending != nil {
+			if extra := opt.InjectPending(); len(extra) > 0 {
+				messages = append(messages, extra...)
+			}
+		}
+
 		compacted, berr := promptctx.EnsureWithinBudget(
 			messages,
 			opt.ContextBudgetTokens,

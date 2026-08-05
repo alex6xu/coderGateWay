@@ -10,6 +10,7 @@ import (
 
 	"github.com/alex/codegateway/internal/account"
 	"github.com/alex/codegateway/internal/agent/memory"
+	sessionrun "github.com/alex/codegateway/internal/agent/sessionrun"
 	"github.com/alex/codegateway/internal/agent/tags"
 	"github.com/alex/codegateway/internal/claudeoauth"
 	"github.com/alex/codegateway/internal/config"
@@ -76,11 +77,24 @@ func Run() error {
 	if _, err := taskWorker.RecoverInterrupted(); err != nil {
 		return fmt.Errorf("failed to recover interrupted agent tasks: %w", err)
 	}
+	sessionRT := newSessionRunRuntime(database, cfg, workspaceMgr, memSvc)
+	sessionRunWorker := sessionrun.NewWorker(sessionrun.WorkerConfig{
+		Store:   sessionRT.store,
+		Execute: sessionRT.execute,
+	})
+	if _, err := sessionRunWorker.RecoverInterrupted(); err != nil {
+		return fmt.Errorf("failed to recover interrupted session runs: %w", err)
+	}
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
 	go func() {
 		if err := taskWorker.Run(workerCtx); err != nil && workerCtx.Err() == nil {
 			log.Printf("Agent Task worker stopped: %v", err)
+		}
+	}()
+	go func() {
+		if err := sessionRunWorker.Run(workerCtx); err != nil && workerCtx.Err() == nil {
+			log.Printf("Session Run worker stopped: %v", err)
 		}
 	}()
 
@@ -92,7 +106,7 @@ func Run() error {
 	go hub.run()
 
 	// Setup routes
-	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc, claudeOAuthSvc, tagSvc)
+	setupRoutes(r, database, cfg, hub, accountMgr, workspaceMgr, memSvc, ghSvc, claudeOAuthSvc, tagSvc, sessionRT)
 
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -113,7 +127,7 @@ func Run() error {
 	return nil
 }
 
-func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service, claudeOAuth *claudeoauth.Service, tagSvc *tags.Service) {
+func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub, accountMgr *account.Manager, workspaceMgr *workspace.Manager, memSvc *memory.MemoryService, ghSvc *githubvcs.Service, claudeOAuth *claudeoauth.Service, tagSvc *tags.Service, sessionRT *sessionRunRuntime) {
 	// CORS middleware
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
@@ -176,14 +190,16 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 
 			agent := protected.Group("/agent")
 			{
-				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc))
+				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc, sessionRT))
 				agent.POST("/tasks", handleCreateAgentTask(database))
 				agent.GET("/tasks", handleListAgentTasks(database))
 				agent.GET("/tasks/:id", handleGetAgentTask(database))
+				agent.GET("/runs/:id/events", handleSessionRunEvents(sessionRT))
+				agent.POST("/runs/:id/cancel", handleCancelSessionRun(sessionRT))
 				agent.GET("/sessions", handleListSessions(database))
 				agent.POST("/sessions/import/preview", handleImportMDPreview())
 				agent.POST("/sessions/import", handleImportMDSession(database, tagSvc))
-				agent.GET("/sessions/:id", handleGetSession(database))
+				agent.GET("/sessions/:id", handleGetSession(database, sessionRT))
 				agent.GET("/tags", handleListTags(tagSvc))
 				agent.GET("/tags/overview", handleTagOverview(tagSvc))
 				agent.GET("/tags/:slug", handleGetTagMessages(tagSvc))

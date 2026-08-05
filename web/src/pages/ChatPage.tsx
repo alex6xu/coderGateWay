@@ -150,22 +150,70 @@ export default function ChatPage() {
           body: JSON.stringify({
             message: input,
             session_id: sessionId,
+            stream: false,
           }),
         }, currentAccount?.id)
         const data = await response.json()
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
 
         if (data.session_id) {
           setSessionId(data.session_id)
         }
 
-        let content = data.response || data.error || 'No response'
-
+        const assistantId = Date.now().toString()
         setMessages(prev => [...prev, {
-          id: Date.now().toString(),
+          id: assistantId,
           role: 'assistant',
-          content: content,
+          content: '',
           timestamp: new Date(),
         }])
+
+        if (data.run_id) {
+          const evRes = await apiFetch(
+            `/v1/agent/runs/${data.run_id}/events?after_seq=0`,
+            {},
+            currentAccount?.id,
+          )
+          if (!evRes.ok || !evRes.body) {
+            throw new Error('failed to subscribe run events')
+          }
+          const reader = evRes.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+          let fullText = ''
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const parts = buffer.split('\n\n')
+            buffer = parts.pop() || ''
+            for (const part of parts) {
+              const line = part.trim()
+              if (!line.startsWith('data:')) continue
+              const payload = line.replace(/^data:\s*/, '')
+              if (payload === '[DONE]') continue
+              try {
+                const ev = JSON.parse(payload)
+                if (ev.session_id) setSessionId(ev.session_id)
+                if (ev.type === 'delta' && ev.content) {
+                  fullText += ev.content
+                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
+                } else if (ev.type === 'done' && ev.content) {
+                  fullText = ev.content
+                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
+                } else if (ev.type === 'error') {
+                  fullText = ev.content || 'error'
+                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
+                }
+              } catch { /* ignore */ }
+            }
+          }
+          if (!fullText) {
+            setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: 'No response' } : m))
+          }
+        } else {
+          setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: data.response || data.error || 'No response' } : m))
+        }
       } catch (error) {
         setMessages(prev => [...prev, {
           id: Date.now().toString(),

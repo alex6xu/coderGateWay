@@ -327,6 +327,53 @@ CREATE TABLE IF NOT EXISTS message_tags (
     FOREIGN KEY (tag_id) REFERENCES question_tags(id)
 );
 CREATE INDEX IF NOT EXISTS idx_message_tags_tag ON message_tags(tag_id);
+
+-- Durable session agent runs (chat/coder) detached from HTTP
+CREATE TABLE IF NOT EXISTS session_runs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'chat',
+    model TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    trigger_message_id TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    started_at DATETIME,
+    finished_at DATETIME,
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_runs_session ON session_runs(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_runs_status ON session_runs(status, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS session_run_events (
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (run_id, seq),
+    FOREIGN KEY (run_id) REFERENCES session_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_run_events_run ON session_run_events(run_id, seq);
+
+CREATE TABLE IF NOT EXISTS session_run_inbox (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (message_id) REFERENCES messages(id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_run_inbox_run ON session_run_inbox(run_id, status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_session_run_inbox_session ON session_run_inbox(session_id, status, created_at ASC);
 `
 
 // Indexes that require user_id columns. Created after upgrade migrations so existing

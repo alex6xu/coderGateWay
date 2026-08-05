@@ -107,12 +107,20 @@ export default function CoderPage() {
 
   const activeWorkspace = workspaces.find((w) => w.id === workspaceId) || null
 
+  const [runId, setRunId] = useState('')
+  const runAbortRef = useRef<AbortController | null>(null)
+
+  const sessionStorageKey = currentAccount?.id
+    ? `cg_coder_session_${currentAccount.id}_${workspaceId || 'none'}`
+    : ''
+
   useEffect(() => {
     fetchModels()
     fetchWorkspaces()
     fetchGitHubStatus()
     setMessages([])
     setSessionId('')
+    setRunId('')
 
     const params = new URLSearchParams(window.location.search)
     const gh = params.get('github')
@@ -134,9 +142,179 @@ export default function CoderPage() {
     }
   }, [currentAccount?.id])
 
+  // Restore session + active run after workspace is known
+  useEffect(() => {
+    if (!currentAccount?.id || !sessionStorageKey) return
+    const saved = sessionStorage.getItem(sessionStorageKey)
+    if (!saved) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, currentAccount.id)
+        if (!res.ok || cancelled) return
+        const data = await res.json()
+        if (cancelled) return
+        setSessionId(saved)
+        const restored: Message[] = (data.messages || []).map(
+          (m: { id: string; role: string; content: string; model?: string; created_at?: string }) => ({
+            id: m.id,
+            role: m.role as Message['role'],
+            content: m.content || '',
+            timestamp: m.created_at ? new Date(m.created_at) : new Date(),
+            model: m.model,
+          }),
+        )
+        setMessages(restored)
+        const active = data.active_run as
+          | { id: string; status: string; last_seq: number; model?: string }
+          | undefined
+        if (active && (active.status === 'running' || active.status === 'queued')) {
+          setRunId(active.id)
+          setIsLoading(true)
+          const assistantId = `run-${active.id}`
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === assistantId)) return prev
+            return [
+              ...prev,
+              {
+                id: assistantId,
+                role: 'assistant',
+                content: '',
+                timestamp: new Date(),
+                model: active.model || selectedModel || undefined,
+                toolSteps: [],
+              },
+            ]
+          })
+          await consumeRunEvents(active.id, 0, assistantId, active.model)
+        }
+      } catch (e) {
+        console.error('restore session failed', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+      runAbortRef.current?.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentAccount?.id, workspaceId, sessionStorageKey])
+
+  useEffect(() => {
+    if (sessionId && sessionStorageKey) {
+      sessionStorage.setItem(sessionStorageKey, sessionId)
+    }
+  }, [sessionId, sessionStorageKey])
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
+
+  type AgentStreamEvent = {
+    type?: string
+    content?: string
+    session_id?: string
+    model?: string
+    step?: { tool: string; args: string; result: string }
+    tool_steps?: { tool: string; args: string; result: string }[]
+  }
+
+  const consumeRunEvents = async (
+    targetRunId: string,
+    afterSeq: number,
+    assistantId: string,
+    fallbackModel?: string,
+  ) => {
+    runAbortRef.current?.abort()
+    const ac = new AbortController()
+    runAbortRef.current = ac
+    const response = await apiFetch(
+      `/v1/agent/runs/${targetRunId}/events?after_seq=${afterSeq}`,
+      { signal: ac.signal },
+      currentAccount?.id,
+    )
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || `HTTP ${response.status}`)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullText = ''
+    const steps: { tool: string; args: string; result: string }[] = []
+    const applyAssistant = (patch: Partial<Message>) => {
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)))
+    }
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const part of parts) {
+          const line = part.trim()
+          if (!line.startsWith('data:')) continue
+          const payload = line.replace(/^data:\s*/, '')
+          if (payload === '[DONE]') continue
+          let ev: AgentStreamEvent
+          try {
+            ev = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (ev.session_id) setSessionId(ev.session_id)
+          if (ev.type === 'delta' && ev.content) {
+            fullText += ev.content
+            applyAssistant({ content: fullText, model: ev.model || fallbackModel || selectedModel })
+          } else if (ev.type === 'tool_step' && ev.step) {
+            steps.push(ev.step)
+            applyAssistant({ toolSteps: [...steps] })
+          } else if (ev.type === 'user_injected' && ev.content) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.content === ev.content && m.role === 'user')) return prev
+              return [
+                ...prev,
+                {
+                  id: `inj-${Date.now()}`,
+                  role: 'system',
+                  content: `已加入本轮上下文：${ev.content}`,
+                  timestamp: new Date(),
+                },
+              ]
+            })
+          } else if (ev.type === 'done') {
+            if (ev.content) fullText = ev.content
+            if (ev.tool_steps?.length) {
+              steps.splice(0, steps.length, ...ev.tool_steps)
+            }
+            applyAssistant({
+              content: fullText,
+              model: ev.model || fallbackModel || selectedModel,
+              toolSteps: steps.length ? [...steps] : undefined,
+            })
+          } else if (ev.type === 'error') {
+            fullText = ev.content || 'Agent error'
+            applyAssistant({ content: fullText })
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      throw err
+    } finally {
+      if (runAbortRef.current === ac) {
+        setIsLoading(false)
+        setRunId('')
+      }
+    }
+    if (!fullText) {
+      applyAssistant({ content: 'No response' })
+    } else if (fullText.includes('no available channel')) {
+      applyAssistant({
+        content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
+      })
+    }
+  }
 
   const fetchModels = async () => {
     try {
@@ -375,7 +553,7 @@ export default function CoderPage() {
   })
 
   const sendMessage = async () => {
-    if (!input.trim() || isLoading) return
+    if (!input.trim()) return
     if (voice.listening) {
       await voice.stop()
     }
@@ -390,8 +568,53 @@ export default function CoderPage() {
 
     setMessages((prev) => [...prev, userMessage])
     setInput('')
-    setIsLoading(true)
 
+    // While a run is active, enqueue into inbox (no new assistant bubble / stream).
+    if (isLoading && runId) {
+      try {
+        const response = await apiFetch(
+          '/v1/agent/chat',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: content,
+              session_id: sessionId,
+              mode: 'coder',
+              model: selectedModel || undefined,
+              workspace_id: workspaceId || undefined,
+              stream: false,
+            }),
+          },
+          currentAccount?.id,
+        )
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+        if (data.session_id) setSessionId(data.session_id)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `queued-${Date.now()}`,
+            role: 'system',
+            content: '已排队：将在当前工具轮结束后注入本轮上下文',
+            timestamp: new Date(),
+          },
+        ])
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'system',
+            content: err instanceof Error ? `排队失败: ${err.message}` : '排队失败',
+            timestamp: new Date(),
+          },
+        ])
+      }
+      return
+    }
+
+    setIsLoading(true)
     const assistantId = (Date.now() + 1).toString()
     setMessages((prev) => [
       ...prev,
@@ -417,84 +640,16 @@ export default function CoderPage() {
             mode: 'coder',
             model: selectedModel || undefined,
             workspace_id: workspaceId || undefined,
-            stream: true,
+            stream: false,
           }),
         },
         currentAccount?.id,
       )
-
-      if (!response.ok || !response.body) {
-        const data = await response.json().catch(() => ({}))
-        throw new Error(data.error || `HTTP ${response.status}`)
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let fullText = ''
-      const steps: { tool: string; args: string; result: string }[] = []
-
-      const applyAssistant = (patch: Partial<Message>) => {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)),
-        )
-      }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() || ''
-        for (const part of parts) {
-          const line = part.trim()
-          if (!line.startsWith('data:')) continue
-          const payload = line.replace(/^data:\s*/, '')
-          if (payload === '[DONE]') continue
-          let ev: {
-            type?: string
-            content?: string
-            session_id?: string
-            model?: string
-            step?: { tool: string; args: string; result: string }
-            tool_steps?: { tool: string; args: string; result: string }[]
-          }
-          try {
-            ev = JSON.parse(payload)
-          } catch {
-            continue
-          }
-          if (ev.session_id) setSessionId(ev.session_id)
-          if (ev.type === 'delta' && ev.content) {
-            fullText += ev.content
-            applyAssistant({ content: fullText, model: ev.model || selectedModel })
-          } else if (ev.type === 'tool_step' && ev.step) {
-            steps.push(ev.step)
-            applyAssistant({ toolSteps: [...steps] })
-          } else if (ev.type === 'done') {
-            if (ev.content) fullText = ev.content
-            if (ev.tool_steps?.length) {
-              steps.splice(0, steps.length, ...ev.tool_steps)
-            }
-            applyAssistant({
-              content: fullText,
-              model: ev.model || selectedModel,
-              toolSteps: steps.length ? [...steps] : undefined,
-            })
-          } else if (ev.type === 'error') {
-            fullText = ev.content || 'Agent error'
-            applyAssistant({ content: fullText })
-          }
-        }
-      }
-
-      if (!fullText) {
-        applyAssistant({ content: 'No response' })
-      } else if (fullText.includes('no available channel')) {
-        applyAssistant({
-          content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
-        })
-      }
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+      if (data.session_id) setSessionId(data.session_id)
+      if (data.run_id) setRunId(data.run_id)
+      await consumeRunEvents(data.run_id, 0, assistantId, selectedModel)
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
@@ -509,14 +664,17 @@ export default function CoderPage() {
             : m,
         ),
       )
-    } finally {
       setIsLoading(false)
     }
   }
 
   const clearChat = () => {
+    runAbortRef.current?.abort()
     setMessages([])
     setSessionId('')
+    setRunId('')
+    setIsLoading(false)
+    if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey)
   }
 
   const downloadWorkspace = () => {
@@ -864,18 +1022,19 @@ export default function CoderPage() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder={
-              workspaceId
-                ? '描述要改的功能，或点麦克风口述…（Enter 发送）'
-                : '先上传/导入项目，或直接粘贴代码提问…'
+              isLoading
+                ? '生成中也可继续输入，将排队注入本轮…'
+                : workspaceId
+                  ? '描述要改的功能，或点麦克风口述…（Enter 发送）'
+                  : '先上传/导入项目，或直接粘贴代码提问…'
             }
             rows={3}
             className="flex-1 px-4 py-2.5 bg-card border border-border rounded-lg text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition-colors resize-none font-mono"
-            disabled={isLoading}
           />
           <VoiceInputButton
             listening={voice.listening}
             supported={voice.supported}
-            disabled={isLoading}
+            disabled={false}
             title={
               voice.engine === 'server'
                 ? '语音输入（服务端 ASR）'
@@ -885,10 +1044,10 @@ export default function CoderPage() {
           />
           <button
             onClick={sendMessage}
-            disabled={isLoading || !input.trim()}
+            disabled={!input.trim()}
             className="h-10 px-4 bg-primary text-primary-foreground rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
           >
-            Run
+            {isLoading ? 'Queue' : 'Run'}
           </button>
         </div>
       </div>

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/alex/codegateway/internal/agent/memory"
-	"github.com/alex/codegateway/internal/agent/promptctx"
+	sessionrun "github.com/alex/codegateway/internal/agent/sessionrun"
 	"github.com/alex/codegateway/internal/agent/tags"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
@@ -22,7 +22,6 @@ import (
 	"github.com/alex/codegateway/internal/gatewaylog"
 	"github.com/alex/codegateway/internal/model"
 	"github.com/alex/codegateway/internal/provider"
-	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -802,22 +801,25 @@ func (a *streamAggregator) toResponse() *provider.ChatCompletionResponse {
 
 // ========== Agent Chat Handler ==========
 
-func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager, mem *memory.MemoryService, tagSvc *tags.Service) gin.HandlerFunc {
+func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspace.Manager, mem *memory.MemoryService, tagSvc *tags.Service, rt *sessionRunRuntime) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
+			return
+		}
+		if rt == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "session run runtime unavailable"})
 			return
 		}
 
 		var req struct {
 			Message     string `json:"message" binding:"required"`
 			SessionID   string `json:"session_id"`
-			Mode        string `json:"mode"`  // "coder" for code development, empty for general chat
-			Model       string `json:"model"` // optional model override
+			Mode        string `json:"mode"`
+			Model       string `json:"model"`
 			WorkspaceID string `json:"workspace_id"`
 			Stream      bool   `json:"stream"`
 		}
-
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -832,20 +834,17 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		sessionID := req.SessionID
 		if sessionID == "" {
 			sessionID = uuid.New().String()
-			_, err := database.Exec(`
+			_, _ = database.Exec(`
 				INSERT INTO sessions (id, user_id, title, platform, message_count, created_at, updated_at)
 				VALUES (?, ?, ?, ?, 0, ?, ?)
 			`, sessionID, accountID, req.Message[:min(50, len(req.Message))], platform, time.Now(), time.Now())
-			if err != nil {
-				// Continue anyway
-			}
 		} else if !sessionOwnedBy(database, sessionID, accountID) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 			return
 		}
 
 		userMsgID := uuid.New().String()
-		database.Exec(`
+		_, _ = database.Exec(`
 			INSERT INTO messages (id, session_id, role, content, created_at)
 			VALUES (?, ?, 'user', ?, ?)
 		`, userMsgID, sessionID, req.Message, time.Now())
@@ -855,9 +854,6 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 				log.Printf("[tags] tag failed: %v", err)
 			} else {
 				questionTags = hits
-				if len(hits) > 0 {
-					log.Printf("[tags] message=%s tags=%v", userMsgID, hits)
-				}
 			}
 		}
 
@@ -865,249 +861,194 @@ func handleAgentChat(database *db.DB, cfg *config.Config, workspaceMgr *workspac
 		if req.Model != "" {
 			modelName = req.Model
 		}
-		var channel *model.Channel
-		var err error
-		if modelName != "" {
-			channel, err = findChannelForModel(database, accountID, modelName)
-		}
-		if channel == nil || err != nil {
-			channel, err = findAnyChannel(database, accountID)
-			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel"})
-				return
-			}
-		}
 
-		modelName = resolveModelForChannel(channel, modelName)
-		log.Printf("[chat/agent] account=%d session=%s mode=%s model=%s channel=%s(type=%d) workspace=%s stream=%v",
-			accountID, sessionID, mode, modelName, channel.Name, channel.Type, req.WorkspaceID, req.Stream)
-
-		prov, err := createProviderFromChannel(channel)
+		status := "running"
+		var run *sessionrun.Run
+		active, err := rt.store.ActiveRunForSession(sessionID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-
-		temperature := cfg.Agent.Temperature
-		maxTokens := cfg.Agent.MaxTokens
-		if maxTokens <= 0 || maxTokens > 16000 {
-			maxTokens = 4096
-		}
-
-		var emit func(AgentEvent)
-		var flusher http.Flusher
-		if req.Stream {
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			var okFlush bool
-			flusher, okFlush = c.Writer.(http.Flusher)
-			if !okFlush {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+		if active != nil {
+			if _, err := rt.store.EnqueueInbox(sessionID, active.ID, userMsgID, req.Message); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-			emit = func(ev AgentEvent) {
-				if ev.Session == "" {
-					ev.Session = sessionID
-				}
-				if ev.Model == "" {
-					ev.Model = modelName
-				}
-				data, err := json.Marshal(ev)
-				if err != nil {
-					return
-				}
-				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-				flusher.Flush()
-			}
-			emit(AgentEvent{Type: "meta", Session: sessionID, Model: modelName})
-		}
-
-		responseContent := ""
-		var usage provider.Usage
-		var toolSteps []map[string]string
-		forceCheckpoint := false
-
-		extraPrefix := ""
-		system := chatSystemPrompt(modelName, mode)
-		projectID := ""
-		toolsCost := 0
-
-		if mode == "coder" && req.WorkspaceID != "" && workspaceMgr != nil {
-			ws, werr := workspaceMgr.Get(accountID, req.WorkspaceID)
-			if werr != nil {
-				if emit != nil {
-					emit(AgentEvent{Type: "error", Content: "workspace not found"})
-					fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-					flusher.Flush()
-					return
-				}
-				c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
-				return
-			}
-			projectID = ws.ID
-			tree, _ := workspaceMgr.ListTree(ws, ".", true)
-			hintLimit := cfg.Agent.TreeHintLimit
-			if hintLimit <= 0 {
-				hintLimit = 40
-			}
-			if hint := RankedTreeHint(tree, req.Message, hintLimit); hint != "" {
-				extraPrefix = "Project files (ranked for this request):\n" + hint
-			}
-			system = coderSystemPrompt(modelName, ws.Name)
-
-			// Refresh project memory snapshot for FTS (upsert)
-			if cfg.Agent.MemoryConfig.Enabled && mem != nil {
-				_ = mem.UpsertProjectMemory(ws.ID, "Workspace "+ws.Name+" files:\n"+hintOrEmpty(tree, hintLimit))
-			}
-
-			toolLimits := tool.ToolLimits{
-				ReadFileDefaultLines: cfg.Agent.ReadFileDefaultLines,
-				ReadFileMaxBytes:     cfg.Agent.ReadFileMaxBytes,
-				GrepMaxBytes:         cfg.Agent.GrepMaxBytes,
-			}
-			registry := tool.NewChrootedRegistry(ws.RootPath, toolLimits)
-			toolsCost = promptctx.EstimateToolsSchema(toProviderTools(registry))
-
-			seed := promptctx.Build(database.DB, promptctx.Options{
-				System:          system,
-				UserMessage:     req.Message,
-				SessionID:       sessionID,
-				ExcludeMsgID:    userMsgID,
-				ExtraUserPrefix: extraPrefix,
-				ProjectID:       projectID,
-				Cfg:             cfg.Agent,
-				Memory:          mem,
-				ToolsSchemaCost: toolsCost,
-			})
-
-			var compacted bool
-			responseContent, usage, toolSteps, compacted, err = runCoderAgent(
-				c.Request.Context(),
-				prov,
-				modelName,
-				seed,
-				ws,
-				coderOptions{
-					Temperature:          temperature,
-					MaxTokens:            maxTokens,
-					MaxIterations:        cfg.Agent.MaxIterations,
-					ToolResultMaxChars:   cfg.Agent.ToolResultMaxChars,
-					ToolResultKeepRecent: cfg.Agent.ToolResultKeepRecent,
-					ContextBudgetTokens:  cfg.Agent.ContextBudgetTokens,
-					ContextCompactRatio:  cfg.Agent.ContextCompactRatio,
-					ParallelReadonly:     cfg.Agent.ParallelReadonlyTools,
-					PromptCacheKey:       "cg-session-" + sessionID,
-					EnablePromptCache:    cfg.Agent.PromptCacheEnabled,
-					ToolLimits:           toolLimits,
-					OnEvent:              emit,
-				},
-			)
-			forceCheckpoint = compacted
-			_ = workspaceMgr.RefreshStats(ws)
+			run = active
+			status = "accepted_queued"
+			log.Printf("[chat/agent] queued inbox session=%s run=%s", sessionID, run.ID)
 		} else {
-			messages := promptctx.Build(database.DB, promptctx.Options{
-				System:       system,
-				UserMessage:  req.Message,
-				SessionID:    sessionID,
-				ExcludeMsgID: userMsgID,
-				ProjectID:    projectID,
-				Cfg:          cfg.Agent,
-				Memory:       mem,
+			run, err = rt.store.CreateQueued(sessionrun.CreateRunInput{
+				SessionID:        sessionID,
+				UserID:           accountID,
+				WorkspaceID:      req.WorkspaceID,
+				Mode:             mode,
+				Model:            modelName,
+				TriggerMessageID: userMsgID,
 			})
-
-			chatReq := &provider.ChatCompletionRequest{
-				Model:       modelName,
-				Messages:    messages,
-				Temperature: &temperature,
-				MaxTokens:   &maxTokens,
-			}
-			if cfg.Agent.PromptCacheEnabled {
-				provider.ApplyPromptCache(chatReq, "cg-session-"+sessionID)
-			}
-
-			if req.Stream && emit != nil {
-				chatReq.StreamOptions = &provider.StreamOptions{IncludeUsage: true}
-				chunks, serr := prov.ChatCompletionStream(c.Request.Context(), chatReq)
-				if serr != nil {
-					err = serr
-				} else {
-					var b strings.Builder
-					for chunk := range chunks {
-						if chunk.Usage != nil {
-							usage.Add(*chunk.Usage)
-						}
-						if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-							b.WriteString(chunk.Choices[0].Delta.Content)
-							emit(AgentEvent{Type: "delta", Content: chunk.Choices[0].Delta.Content})
-						}
-					}
-					responseContent = b.String()
-				}
-			} else {
-				var resp *provider.ChatCompletionResponse
-				resp, err = prov.ChatCompletion(c.Request.Context(), chatReq)
-				if err == nil && resp != nil {
-					usage = resp.Usage
-					usage.Normalize()
-					if len(resp.Choices) > 0 {
-						responseContent = resp.Choices[0].Message.Content
-					}
-				}
-			}
-		}
-
-		if err != nil {
-			if emit != nil {
-				emit(AgentEvent{Type: "error", Content: err.Error()})
-				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-				flusher.Flush()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+			status = "queued"
+			log.Printf("[chat/agent] queued run session=%s run=%s mode=%s model=%s workspace=%s",
+				sessionID, run.ID, mode, modelName, req.WorkspaceID)
 		}
 
-		assistantMsgID := uuid.New().String()
-		database.Exec(`
-			INSERT INTO messages (id, session_id, role, content, model, provider, tokens, created_at)
-			VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)
-		`, assistantMsgID, sessionID, responseContent, modelName, channel.Name, usage.TotalTokens, time.Now())
-
-		database.Exec(`
-			UPDATE sessions SET message_count = message_count + 2, updated_at = ? WHERE id = ?
-		`, time.Now(), sessionID)
-
-		if cfg.Agent.MemoryConfig.Enabled && mem != nil {
-			promptctx.MaybeCheckpointEx(database.DB, mem, sessionID, cfg.Agent.SummarizeEveryTurns, forceCheckpoint)
-		}
-
-		logUsage(database, accountID, channel, modelName, usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
-
-		if emit != nil {
-			emit(AgentEvent{
-				Type:      "done",
-				Content:   responseContent,
-				Usage:     &usage,
-				Session:   sessionID,
-				Model:     modelName,
-				ToolSteps: toolSteps,
-			})
-			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-			flusher.Flush()
+		if req.Stream {
+			after := int64(0)
+			if status == "accepted_queued" {
+				after = run.LastSeq
+			}
+			streamSessionRunEvents(c, rt, accountID, run.ID, after)
 			return
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"response":      responseContent,
-			"session_id":    sessionID,
-			"model":         modelName,
-			"usage":         usage,
-			"workspace_id":  req.WorkspaceID,
-			"tool_steps":    toolSteps,
-			"cached_tokens": usage.CachedTokens,
-			"tags":          questionTags,
+			"session_id": sessionID,
+			"run_id":     run.ID,
+			"status":     status,
+			"tags":       questionTags,
 		})
+	}
+}
+
+func handleSessionRunEvents(rt *sessionRunRuntime) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+		afterSeq, _ := strconv.ParseInt(c.Query("after_seq"), 10, 64)
+		streamSessionRunEvents(c, rt, accountID, c.Param("id"), afterSeq)
+	}
+}
+
+func streamSessionRunEvents(c *gin.Context, rt *sessionRunRuntime, accountID int64, runID string, afterSeq int64) {
+	if rt == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session run runtime unavailable"})
+		return
+	}
+	run, err := rt.store.Get(accountID, runID)
+	if errors.Is(err, sessionrun.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming not supported"})
+		return
+	}
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	writeEv := func(ev sessionrun.Event) {
+		agentEv := eventPayloadToAgentEvent(ev)
+		agentEv.Type = string(ev.Type)
+		if agentEv.Session == "" {
+			agentEv.Session = run.SessionID
+		}
+		data, err := json.Marshal(agentEv)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	replay, err := rt.store.ListEventsAfter(runID, afterSeq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	last := afterSeq
+	for _, ev := range replay {
+		writeEv(ev)
+		last = ev.Seq
+		if ev.Type == sessionrun.EventDone || ev.Type == sessionrun.EventError {
+			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+	}
+
+	// Refresh terminal status after replay.
+	if cur, _ := rt.store.GetByID(runID); cur != nil {
+		switch cur.Status {
+		case sessionrun.StatusSucceeded, sessionrun.StatusFailed, sessionrun.StatusCancelled:
+			fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+	}
+
+	ch := rt.hub.Subscribe(runID)
+	defer rt.hub.Unsubscribe(runID, ch)
+
+	notify := c.Request.Context().Done()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-notify:
+			return
+		case <-ticker.C:
+			fmt.Fprintf(c.Writer, ": ping\n\n")
+			flusher.Flush()
+			if cur, _ := rt.store.GetByID(runID); cur != nil {
+				switch cur.Status {
+				case sessionrun.StatusSucceeded, sessionrun.StatusFailed, sessionrun.StatusCancelled:
+					// Drain any remaining events then exit.
+					more, _ := rt.store.ListEventsAfter(runID, last)
+					for _, ev := range more {
+						writeEv(ev)
+						last = ev.Seq
+					}
+					fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+					flusher.Flush()
+					return
+				}
+			}
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if ev.Seq <= last {
+				continue
+			}
+			writeEv(ev)
+			last = ev.Seq
+			if ev.Type == sessionrun.EventDone || ev.Type == sessionrun.EventError {
+				fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+		}
+	}
+}
+
+func handleCancelSessionRun(rt *sessionRunRuntime) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+		run, err := rt.store.RequestCancel(accountID, c.Param("id"))
+		if errors.Is(err, sessionrun.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "run not found"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"run": run})
 	}
 }
 
@@ -1155,7 +1096,7 @@ func handleListSessions(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-func handleGetSession(database *db.DB) gin.HandlerFunc {
+func handleGetSession(database *db.DB, rt *sessionRunRuntime) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -1221,10 +1162,17 @@ func handleGetSession(database *db.DB) gin.HandlerFunc {
 			messages = append(messages, msg)
 		}
 
-		c.JSON(http.StatusOK, gin.H{
+		resp := gin.H{
 			"session":  session,
 			"messages": messages,
-		})
+		}
+		if rt != nil {
+			if active, err := rt.store.ActiveRunForSession(id); err == nil && active != nil {
+				resp["active_run"] = active
+				resp["last_event_seq"] = active.LastSeq
+			}
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }
 
