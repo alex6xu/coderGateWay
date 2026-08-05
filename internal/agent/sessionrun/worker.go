@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
+
+	"github.com/alex/codegateway/internal/db"
 )
 
 type Executor func(ctx context.Context, run *Run) error
@@ -38,6 +41,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	for {
 		processed, err := w.ProcessNext(ctx)
 		if err != nil {
+			if db.IsBusy(err) {
+				log.Printf("Session Run worker: database busy, retrying: %v", err)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(w.config.PollInterval):
+					continue
+				}
+			}
 			return err
 		}
 		if processed {

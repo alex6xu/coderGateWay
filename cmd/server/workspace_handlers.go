@@ -170,12 +170,20 @@ func handleUploadWorkspace(mgr *workspace.Manager) gin.HandlerFunc {
 				return
 			}
 
-			for _, fh := range files {
-				rel := fh.Filename
+			rawPaths := make([]string, len(files))
+			for i, fh := range files {
+				rawPaths[i] = fh.Filename
+			}
+			_, stripped := stripCommonRootPrefix(rawPaths)
+			for i, fh := range files {
+				rel := stripped[i]
 				if rel == "" {
 					continue
 				}
-				// Skip junk
+				// Skip junk / hidden path segments
+				if zipPathHasHiddenSegment(filepath.ToSlash(rel)) {
+					continue
+				}
 				base := filepath.Base(rel)
 				if base == ".DS_Store" || strings.HasPrefix(base, "._") {
 					continue

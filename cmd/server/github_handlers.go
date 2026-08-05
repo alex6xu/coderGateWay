@@ -1,13 +1,9 @@
 package server
 
 import (
-	"archive/zip"
-	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -218,80 +214,3 @@ func handleGitHubImportRepo(gh *githubvcs.Service, workspaceMgr *workspace.Manag
 	}
 }
 
-// unzipGitHubZipball extracts a GitHub zipball, stripping the top-level folder
-// (e.g. owner-repo-sha/).
-func unzipGitHubZipball(zipPath, dest string) error {
-	r, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	destAbs, err := filepath.Abs(dest)
-	if err != nil {
-		return err
-	}
-
-	prefix := ""
-	for _, f := range r.File {
-		name := filepath.ToSlash(f.Name)
-		if name == "" || strings.HasPrefix(name, "__MACOSX/") {
-			continue
-		}
-		parts := strings.SplitN(name, "/", 2)
-		if len(parts) == 0 {
-			continue
-		}
-		prefix = parts[0] + "/"
-		break
-	}
-
-	for _, f := range r.File {
-		name := filepath.ToSlash(f.Name)
-		if name == "" || strings.HasPrefix(name, "__MACOSX/") {
-			continue
-		}
-		rel := name
-		if prefix != "" && strings.HasPrefix(name, prefix) {
-			rel = strings.TrimPrefix(name, prefix)
-		}
-		if rel == "" {
-			continue
-		}
-
-		target := filepath.Join(destAbs, filepath.FromSlash(rel))
-		targetAbs, err := filepath.Abs(target)
-		if err != nil {
-			return err
-		}
-		if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(os.PathSeparator)) {
-			return fmt.Errorf("zip path escapes destination: %s", name)
-		}
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetAbs, 0755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(targetAbs), 0755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		out, err := os.Create(targetAbs)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, copyErr := io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-	}
-	return nil
-}

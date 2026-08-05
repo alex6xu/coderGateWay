@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/alex/codegateway/internal/db"
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/workspace"
 )
@@ -55,6 +57,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	for {
 		processed, err := w.ProcessNext(ctx)
 		if err != nil {
+			if db.IsBusy(err) {
+				log.Printf("Agent Task worker: database busy, retrying: %v", err)
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(w.config.PollInterval):
+					continue
+				}
+			}
 			return err
 		}
 		if processed {
