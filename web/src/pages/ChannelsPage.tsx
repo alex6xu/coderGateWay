@@ -375,6 +375,8 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
     auth_mode: 'api_key' as string,
   })
   const [fetchingModels, setFetchingModels] = useState(false)
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [modelPick, setModelPick] = useState('')
 
   const fetchChannels = async () => {
     try {
@@ -421,6 +423,8 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
   const resetForm = (defaultType: number = 1) => {
     nameTouchedRef.current = false
     setNameTouched(false)
+    setAvailableModels([])
+    setModelPick('')
     setForm(syncAutoName({
       name: '',
       type: defaultType,
@@ -451,6 +455,8 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
     setModalMode(mode)
     nameTouchedRef.current = true
     setNameTouched(true)
+    setAvailableModels([])
+    setModelPick('')
     setForm({
       name: channel.name,
       type: channel.type === 7 ? 6 : channel.type,
@@ -580,18 +586,69 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
     }
   }
 
+  const parseModelsField = (raw: string): string[] => {
+    const trimmed = raw.trim()
+    if (!trimmed) return []
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (Array.isArray(parsed)) {
+          return parsed.map((m) => String(m).trim()).filter(Boolean)
+        }
+      } catch {
+        // fall through
+      }
+    }
+    return trimmed.split(',').map((m) => m.trim()).filter(Boolean)
+  }
+
+  const addModelFromList = (modelId: string) => {
+    if (!modelId) return
+    setForm((prev) => {
+      const existing = parseModelsField(prev.models)
+      if (existing.some((m) => m.toLowerCase() === modelId.toLowerCase())) {
+        return syncAutoName(prev)
+      }
+      const nextModels = [...existing, modelId].join(', ')
+      return syncAutoName({ ...prev, models: nextModels })
+    })
+    // Reset so the same option can be chosen again after manual removal.
+    setModelPick('')
+  }
+
   const handleFetchModels = async () => {
-    if (!editingId) return
+    if (modalMode === 'api_key' && !editingId && !form.key.trim()) {
+      alert('请先填写 API Key 再获取模型列表')
+      return
+    }
     setFetchingModels(true)
     try {
-      const res = await apiFetch(`/v1/admin/channels/${editingId}/fetch-models`, { method: 'POST' }, accountId)
+      const res = editingId
+        ? await apiFetch(`/v1/admin/channels/${editingId}/fetch-models`, { method: 'POST' }, accountId)
+        : await apiFetch('/v1/admin/channels/fetch-models', {
+            method: 'POST',
+            body: JSON.stringify({
+              type: form.type,
+              key: form.key,
+              base_url: form.base_url,
+              auth_mode: modalMode,
+            }),
+          }, accountId)
       if (res.ok) {
         const data = await res.json()
-        const modelStr = (data.models || []).join(', ')
-        setForm((prev) => syncAutoName({ ...prev, models: modelStr }))
+        const list: string[] = Array.isArray(data.models) ? data.models.filter(Boolean) : []
+        setAvailableModels(list)
+        setModelPick('')
+        if (list.length === 0) {
+          alert('上游未返回可用模型')
+        }
+      } else {
+        const data = await res.json().catch(() => ({}))
+        alert(data.error || '获取模型列表失败')
       }
     } catch (e) {
       console.error('Failed to fetch models:', e)
+      alert('获取模型列表失败')
     } finally {
       setFetchingModels(false)
     }
@@ -817,19 +874,35 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
               <div>
                 <label className="block text-[13px] font-medium text-foreground mb-1.5">Models (逗号分隔，留空表示全部)</label>
                 <div className="flex gap-2">
-                  <input
-                    value={form.models}
-                    onChange={(e) => setForm((prev) => syncAutoName({ ...prev, models: e.target.value }))}
-                    placeholder="gpt-4o, gpt-3.5-turbo"
-                    className="flex-1 h-9 px-3 bg-background border border-border rounded-lg text-[13px]"
-                  />
-                  {editingId && (
-                    <button type="button" onClick={handleFetchModels} disabled={fetchingModels}
-                      className="h-9 px-3 text-[12px] text-primary border border-primary/30 rounded-lg hover:bg-primary/10 disabled:opacity-50 whitespace-nowrap">
-                      {fetchingModels ? '...' : 'Fetch Models'}
-                    </button>
-                  )}
+                  <select
+                    value={modelPick}
+                    onChange={(e) => addModelFromList(e.target.value)}
+                    disabled={availableModels.length === 0}
+                    className="flex-1 h-9 px-3 bg-background border border-border rounded-lg text-[13px] disabled:opacity-50"
+                  >
+                    <option value="">
+                      {availableModels.length === 0 ? '点击 Fetch Models 获取列表' : '从已获取列表中选择模型'}
+                    </option>
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={handleFetchModels} disabled={fetchingModels}
+                    className="h-9 px-3 text-[12px] text-primary border border-primary/30 rounded-lg hover:bg-primary/10 disabled:opacity-50 whitespace-nowrap">
+                    {fetchingModels ? '...' : 'Fetch Models'}
+                  </button>
                 </div>
+                <input
+                  value={form.models}
+                  onChange={(e) => setForm((prev) => syncAutoName({ ...prev, models: e.target.value }))}
+                  placeholder="已选模型，可手动编辑，如 gpt-4o, gpt-3.5-turbo"
+                  className="mt-2 w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px]"
+                />
+                {availableModels.length > 0 && (
+                  <p className="mt-1.5 text-[12px] text-muted-foreground">
+                    已获取 {availableModels.length} 个模型，可从上方下拉框选择添加
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center gap-2">

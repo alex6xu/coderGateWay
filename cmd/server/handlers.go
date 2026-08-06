@@ -350,16 +350,73 @@ func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
 		}
 
 		var ch model.Channel
+		var userID int64
 		err = database.QueryRow(`
-			SELECT id, name, type, key, base_url, models, weight, priority, status
+			SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status,
+			       COALESCE(auth_mode, 'api_key')
 			FROM channels WHERE id = ? AND user_id = ?
-		`, channelID, accountID).Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status)
+		`, channelID, accountID).Scan(
+			&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status,
+			&ch.AuthMode,
+		)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
+		ch.UserID = &userID
 
-		models := modelsForChannel(c.Request.Context(), &ch)
+		models, err := listUpstreamModels(c.Request.Context(), &ch)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"models": models})
+	}
+}
+
+// handleProbeChannelModels fetches upstream models using form credentials (for add-provider flow).
+func handleProbeChannelModels() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+
+		var req struct {
+			Type     int    `json:"type"`
+			Key      string `json:"key"`
+			BaseURL  string `json:"base_url"`
+			AuthMode string `json:"auth_mode"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		if req.Type == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "type is required"})
+			return
+		}
+		authMode := strings.TrimSpace(req.AuthMode)
+		if authMode == "" {
+			authMode = "api_key"
+		}
+		if !strings.EqualFold(authMode, "oauth") && strings.TrimSpace(req.Key) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "api key is required to fetch models"})
+			return
+		}
+
+		ch := &model.Channel{
+			Type:     req.Type,
+			Key:      req.Key,
+			BaseURL:  req.BaseURL,
+			AuthMode: authMode,
+			UserID:   &accountID,
+		}
+		models, err := listUpstreamModels(c.Request.Context(), ch)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"models": models})
 	}
 }

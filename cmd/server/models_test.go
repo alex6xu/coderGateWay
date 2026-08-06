@@ -62,3 +62,19 @@ func TestSupportsUpstreamModelList(t *testing.T) {
 		t.Fatal("custom should support upstream model list")
 	}
 }
+
+func TestListUpstreamModelsRequiresKey(t *testing.T) {
+	ch := &model.Channel{Type: model.ChannelTypeOpenAI, Key: "", AuthMode: "api_key"}
+	_, err := listUpstreamModels(t.Context(), ch)
+	if err == nil {
+		t.Fatal("expected error when api key is missing")
+	}
+}
+
+func TestListUpstreamModelsRejectsUnsupportedType(t *testing.T) {
+	ch := &model.Channel{Type: 999, Key: "sk-test", AuthMode: "api_key"}
+	_, err := listUpstreamModels(t.Context(), ch)
+	if err == nil {
+		t.Fatal("expected error for unsupported channel type")
+	}
+}
