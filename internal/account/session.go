@@ -3,6 +3,7 @@ package account
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/alex/codegateway/internal/model"
@@ -16,8 +17,12 @@ const (
 	AuthHeader = "Authorization"
 	// SessionHeader is an alternative header for session tokens.
 	SessionHeader = "X-Session-Token"
+	// APIKeyHeader is used by OpenAI/Anthropic-style clients for gateway API keys.
+	APIKeyHeader = "X-API-Key"
 	// SessionContextKey stores the session token in gin context.
 	SessionContextKey = "session_token"
+	// APITokenIDContextKey stores the tokens.id when authenticated via API key.
+	APITokenIDContextKey = "api_token_id"
 	// AuthUserContextKey stores the authenticated user id.
 	AuthUserContextKey = "auth_user_id"
 	// AuthRoleContextKey stores the authenticated user role.
@@ -98,4 +103,36 @@ func (m *Manager) DeleteUserSessions(userID int64) error {
 func (m *Manager) CleanupExpiredSessions() error {
 	_, err := m.db.Exec("DELETE FROM auth_sessions WHERE expires_at < ?", time.Now())
 	return err
+}
+
+// APIToken is a resolved gateway API key ownership record.
+type APIToken struct {
+	ID     int64
+	UserID int64
+	Name   string
+}
+
+// LookupAPIToken finds an enabled, non-expired API key and returns its owner.
+func (m *Manager) LookupAPIToken(key string) (*APIToken, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("api key required")
+	}
+	var t APIToken
+	var expiredAt sql.NullTime
+	err := m.db.QueryRow(`
+		SELECT id, user_id, COALESCE(name, ''), expired_at
+		FROM tokens
+		WHERE key = ? AND status = 1
+	`, key).Scan(&t.ID, &t.UserID, &t.Name, &expiredAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("invalid api key")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup api key: %w", err)
+	}
+	if expiredAt.Valid && time.Now().After(expiredAt.Time) {
+		return nil, fmt.Errorf("api key expired")
+	}
+	return &t, nil
 }

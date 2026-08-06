@@ -137,6 +137,86 @@ func requireAuth(mgr *account.Manager) gin.HandlerFunc {
 	}
 }
 
+// requireSessionOrAPIKey authenticates gateway proxy requests with either a
+// login session token or a user API key (tokens table). Either credential is enough.
+func requireSessionOrAPIKey(mgr *account.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if applySessionAuth(c, mgr) {
+			c.Next()
+			return
+		}
+		if applyAPIKeyAuth(c, mgr) {
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "authentication required: provide session token or API key",
+		})
+	}
+}
+
+func applySessionAuth(c *gin.Context, mgr *account.Manager) bool {
+	token := extractSessionToken(c)
+	if token == "" {
+		return false
+	}
+	user, err := mgr.GetSessionUser(token)
+	if err != nil {
+		return false
+	}
+	c.Set(account.SessionContextKey, token)
+	c.Set(account.AuthUserContextKey, user.ID)
+	c.Set(account.AuthRoleContextKey, user.Role)
+	c.Set(account.ContextKey, user.ID)
+	return true
+}
+
+func applyAPIKeyAuth(c *gin.Context, mgr *account.Manager) bool {
+	key := extractAPIKey(c)
+	if key == "" {
+		return false
+	}
+	tok, err := mgr.LookupAPIToken(key)
+	if err != nil {
+		return false
+	}
+	user, err := mgr.Get(tok.UserID)
+	if err != nil {
+		return false
+	}
+	c.Set(account.APITokenIDContextKey, tok.ID)
+	c.Set(account.AuthUserContextKey, user.ID)
+	c.Set(account.AuthRoleContextKey, user.Role)
+	c.Set(account.ContextKey, user.ID)
+	return true
+}
+
+// extractAPIKey reads X-API-Key / api-key, or Authorization Bearer when session lookup failed.
+// Callers should try session auth first; this returns the bearer value for API-key attempt too.
+func extractAPIKey(c *gin.Context) string {
+	if h := c.GetHeader(account.APIKeyHeader); h != "" {
+		return strings.TrimSpace(h)
+	}
+	if h := c.GetHeader("api-key"); h != "" {
+		return strings.TrimSpace(h)
+	}
+	auth := c.GetHeader(account.AuthHeader)
+	if auth != "" {
+		const prefix = "Bearer "
+		if strings.HasPrefix(auth, prefix) {
+			return strings.TrimSpace(auth[len(prefix):])
+		}
+		return strings.TrimSpace(auth)
+	}
+	if q := c.Query("api_key"); q != "" {
+		return strings.TrimSpace(q)
+	}
+	if q := c.Query("key"); q != "" {
+		return strings.TrimSpace(q)
+	}
+	return ""
+}
+
 func requireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		role, _ := c.Get(account.AuthRoleContextKey)

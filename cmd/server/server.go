@@ -132,7 +132,7 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Account-ID, X-Session-Token")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Account-ID, X-Session-Token, X-API-Key, api-key")
 		c.Header("Access-Control-Allow-Credentials", "true")
 		// CSP header for development
 		c.Header("Content-Security-Policy", "script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'")
@@ -172,22 +172,24 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 		v1.GET("/github/callback", handleGitHubCallback(ghSvc))
 		v1.GET("/claude/oauth/callback", handleClaudeOAuthCallback(claudeOAuth))
 
+		// Gateway proxy: login session token OR user API key (either is enough).
+		gatewayAuth := requireSessionOrAPIKey(accountMgr)
+		v1.POST("/chat/completions", gatewayAuth, handleChatCompletions(database, cfg))
+		v1.GET("/models", gatewayAuth, handleListModels(database))
+		v1.GET("/models/*model", gatewayAuth, handleRetrieveModel(database))
+		gateway := v1.Group("/gateway")
+		gateway.Use(gatewayAuth)
+		{
+			gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
+			gateway.GET("/models", handleListModels(database))
+			gateway.GET("/models/*model", handleRetrieveModel(database))
+			gateway.POST("/messages", handleClaudeMessages(database, cfg))
+			gateway.POST("/v1beta/*path", handleGemini(database, cfg))
+		}
+
 		protected := v1.Group("")
 		protected.Use(requireAuth(accountMgr))
 		{
-			protected.POST("/chat/completions", handleChatCompletions(database, cfg))
-			protected.GET("/models", handleListModels(database))
-			protected.GET("/models/*model", handleRetrieveModel(database))
-
-			gateway := protected.Group("/gateway")
-			{
-				gateway.POST("/chat/completions", handleChatCompletions(database, cfg))
-				gateway.GET("/models", handleListModels(database))
-				gateway.GET("/models/*model", handleRetrieveModel(database))
-				gateway.POST("/messages", handleClaudeMessages(database, cfg))
-				gateway.POST("/v1beta/*path", handleGemini(database, cfg))
-			}
-
 			agent := protected.Group("/agent")
 			{
 				agent.POST("/chat", handleAgentChat(database, cfg, workspaceMgr, memSvc, tagSvc, sessionRT))

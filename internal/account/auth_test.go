@@ -81,3 +81,35 @@ func TestAdminDefaultPassword(t *testing.T) {
 		t.Fatalf("admin login with default password: %v", err)
 	}
 }
+
+func TestLookupAPIToken(t *testing.T) {
+	mgr := setupTestDB(t)
+	admin, err := mgr.EnsureDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.LookupAPIToken("sk-missing"); err == nil {
+		t.Fatal("expected missing key error")
+	}
+
+	const key = "sk-test-gateway-key-001"
+	_, err = mgr.db.Exec(`
+		INSERT INTO tokens (user_id, name, key, status, remain_quota, unlimited_quota, created_at)
+		VALUES (?, 't1', ?, 1, -1, 1, CURRENT_TIMESTAMP)
+	`, admin.ID, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := mgr.LookupAPIToken(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.UserID != admin.ID {
+		t.Fatalf("owner=%d want %d", tok.UserID, admin.ID)
+	}
+
+	_, _ = mgr.db.Exec(`UPDATE tokens SET status = 0 WHERE key = ?`, key)
+	if _, err := mgr.LookupAPIToken(key); err == nil {
+		t.Fatal("disabled key should fail")
+	}
+}

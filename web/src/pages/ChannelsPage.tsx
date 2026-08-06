@@ -242,7 +242,10 @@ function EndpointManager({ accountId }: { accountId?: number }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
             <p className="text-[13px] font-medium text-foreground">API Key 列表</p>
-            <p className="text-[12px] text-muted-foreground mt-0.5">点击「新增 API Key」由后端自动生成并展示，生成后请立即复制保存。</p>
+            <p className="text-[12px] text-muted-foreground mt-0.5">
+              客户端用 <code className="text-[11px]">Authorization: Bearer &lt;API Key&gt;</code> 或{' '}
+              <code className="text-[11px]">X-API-Key</code>；Web 登录态的 Session Token 也可访问网关，二者任一即可。
+            </p>
           </div>
           <button
             onClick={handleCreate}
