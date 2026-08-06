@@ -85,6 +85,7 @@ func (rt *sessionRunRuntime) execute(ctx context.Context, run *sessionrun.Run) e
 		_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, err.Error())
 		return err
 	}
+	prov = wrapProviderWithRequestLog(rt.database, run.UserID, channel, prov)
 
 	temperature := rt.cfg.Agent.Temperature
 	maxTokens := rt.cfg.Agent.MaxTokens
