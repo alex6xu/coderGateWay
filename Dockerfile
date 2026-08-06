@@ -22,8 +22,8 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Install ca-certificates for HTTPS
-RUN apk add --no-cache ca-certificates
+# Install ca-certificates and git (needed for GitHub clone/pull/push)
+RUN apk add --no-cache ca-certificates git
 
 # Copy binary
 COPY --from=builder /app/codegateway .

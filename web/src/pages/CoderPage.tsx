@@ -101,6 +101,7 @@ export default function CoderPage() {
   const [ghLoading, setGhLoading] = useState(false)
   const [ghImporting, setGhImporting] = useState('')
   const [ghError, setGhError] = useState('')
+  const [ghSyncing, setGhSyncing] = useState<'pull' | 'push' | ''>('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const dirInputRef = useRef<HTMLInputElement>(null)
@@ -462,7 +463,7 @@ export default function CoderPage() {
           {
             id: Date.now().toString(),
             role: 'system',
-            content: `已从 GitHub 导入「${data.workspace.github_full_name || data.workspace.name}」到云端工作区（${data.workspace.file_count} 个文件，${formatBytes(data.workspace.size_bytes)}）。可直接描述要改的功能。`,
+            content: `已从 GitHub 克隆「${data.workspace.github_full_name || data.workspace.name}」到云端工作区（${data.workspace.file_count} 个文件，${formatBytes(data.workspace.size_bytes)}）。可用 Pull 同步远端，修改后可用 Push 推回。`,
             timestamp: new Date(),
           },
         ])
@@ -471,6 +472,83 @@ export default function CoderPage() {
       setGhError('导入失败，请重试')
     } finally {
       setGhImporting('')
+    }
+  }
+
+  const pullGitHubWorkspace = async () => {
+    if (!workspaceId || !activeWorkspace || activeWorkspace.source !== 'github') return
+    setGhSyncing('pull')
+    setUploadError('')
+    try {
+      const response = await apiFetch(
+        `/v1/github/workspaces/${workspaceId}/pull`,
+        { method: 'POST' },
+        currentAccount?.id,
+      )
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setUploadError(data.error || 'Pull 失败')
+        return
+      }
+      await fetchWorkspaces()
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'system',
+          content: data.result?.message
+            ? `${data.result.message}${data.result.head ? ` @ ${data.result.head}` : ''}`
+            : '已从 GitHub Pull 最新代码',
+          timestamp: new Date(),
+        },
+      ])
+    } catch {
+      setUploadError('Pull 失败，请重试')
+    } finally {
+      setGhSyncing('')
+    }
+  }
+
+  const pushGitHubWorkspace = async () => {
+    if (!workspaceId || !activeWorkspace || activeWorkspace.source !== 'github') return
+    const message = window.prompt('提交说明（commit message）', 'Update from CodeGateway')
+    if (message === null) return
+    setGhSyncing('push')
+    setUploadError('')
+    try {
+      const response = await apiFetch(
+        `/v1/github/workspaces/${workspaceId}/push`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: message.trim() || 'Update from CodeGateway',
+            branch: activeWorkspace.github_default_branch || undefined,
+          }),
+        },
+        currentAccount?.id,
+      )
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setUploadError(data.error || 'Push 失败')
+        return
+      }
+      await fetchWorkspaces()
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'system',
+          content: data.result?.message
+            ? `${data.result.message}${data.result.head ? ` @ ${data.result.head}` : ''}`
+            : '已 Push 到 GitHub',
+          timestamp: new Date(),
+        },
+      ])
+    } catch {
+      setUploadError('Push 失败，请重试')
+    } finally {
+      setGhSyncing('')
     }
   }
 
@@ -821,6 +899,26 @@ export default function CoderPage() {
         </select>
         {workspaceId && (
           <>
+            {activeWorkspace?.source === 'github' && (
+              <>
+                <button
+                  onClick={() => void pullGitHubWorkspace()}
+                  disabled={!!ghSyncing || !ghConnected}
+                  className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent text-foreground disabled:opacity-50"
+                  title={!ghConnected ? '请先连接 GitHub' : '从 GitHub 拉取最新代码'}
+                >
+                  {ghSyncing === 'pull' ? 'Pulling…' : 'Pull'}
+                </button>
+                <button
+                  onClick={() => void pushGitHubWorkspace()}
+                  disabled={!!ghSyncing || !ghConnected}
+                  className="h-8 px-3 text-[12px] border border-primary/30 text-primary rounded-md hover:bg-primary/10 disabled:opacity-50"
+                  title={!ghConnected ? '请先连接 GitHub' : '提交并推送到 GitHub'}
+                >
+                  {ghSyncing === 'push' ? 'Pushing…' : 'Push'}
+                </button>
+              </>
+            )}
             <button
               onClick={downloadWorkspace}
               className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent text-muted-foreground"
@@ -851,7 +949,7 @@ export default function CoderPage() {
             <div>
               <h3 className="text-sm font-medium text-foreground">从 GitHub 导入仓库</h3>
               <p className="text-[11px] text-muted-foreground mt-0.5">
-                授权后可将仓库拉取为云端工作区，供 Agent 读写代码
+                授权后可克隆仓库到云端工作区；Agent 改完代码后可用 Pull / Push 与远端同步
               </p>
             </div>
             <button
@@ -943,10 +1041,10 @@ export default function CoderPage() {
               </div>
               <h3 className="text-base font-semibold text-foreground mb-1.5">AI 编码工作流</h3>
               <p className="text-[13px] text-muted-foreground mb-4 text-left leading-relaxed">
-                1. 点击「选择本地目录并上传云端」把项目同步到服务器工作区<br />
+                1. 上传本地目录，或连接 GitHub 并导入仓库到云端工作区<br />
                 2. 用快捷任务或自然语言描述需求（例如：给 user 模块加分页 API）<br />
                 3. Agent 会在云端目录里 list/read/grep/write 文件完成修改<br />
-                4. 用「下载修改后的 zip」拿回结果，或继续多轮对话迭代
+                4. GitHub 工作区可用 Pull 同步远端、Push 推回仓库，或下载 zip
               </p>
               {!workspaceId && (
                 <p className="text-[12px] text-amber-600 mb-4">尚未选择工作区：仍可聊天要代码片段，但无法直接改你的项目文件。</p>

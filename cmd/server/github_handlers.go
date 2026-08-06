@@ -182,35 +182,135 @@ func handleGitHubImportRepo(gh *githubvcs.Service, workspaceMgr *workspace.Manag
 			return
 		}
 
-		tmp, err := os.CreateTemp("", "gh-zipball-*.zip")
-		if err != nil {
-			_ = workspaceMgr.Delete(accountID, ws.ID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create temp file"})
-			return
-		}
-		tmpPath := tmp.Name()
-		defer os.Remove(tmpPath)
+		// Prefer real git clone so pull/push work; fall back to zipball if git is unavailable.
+		_ = os.RemoveAll(ws.RootPath)
+		sync, cloneErr := gh.CloneRepo(c.Request.Context(), accountID, req.Owner, req.Repo, req.Branch, ws.RootPath)
+		if cloneErr != nil {
+			if mkErr := os.MkdirAll(ws.RootPath, 0755); mkErr != nil {
+				_ = workspaceMgr.Delete(accountID, ws.ID)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": mkErr.Error()})
+				return
+			}
+			tmp, err := os.CreateTemp("", "gh-zipball-*.zip")
+			if err != nil {
+				_ = workspaceMgr.Delete(accountID, ws.ID)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create temp file"})
+				return
+			}
+			tmpPath := tmp.Name()
+			defer os.Remove(tmpPath)
 
-		ref := req.Branch
-		if ref == "" {
-			ref = "HEAD"
-		}
-		if err := gh.DownloadZipball(c.Request.Context(), accountID, req.Owner, req.Repo, ref, tmp); err != nil {
+			ref := req.Branch
+			if ref == "" {
+				ref = "HEAD"
+			}
+			if err := gh.DownloadZipball(c.Request.Context(), accountID, req.Owner, req.Repo, ref, tmp); err != nil {
+				tmp.Close()
+				_ = workspaceMgr.Delete(accountID, ws.ID)
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error() + "; git clone also failed: " + cloneErr.Error()})
+				return
+			}
 			tmp.Close()
-			_ = workspaceMgr.Delete(accountID, ws.ID)
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+			if err := unzipGitHubZipball(tmpPath, ws.RootPath); err != nil {
+				_ = workspaceMgr.Delete(accountID, ws.ID)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to extract repository: " + err.Error()})
+				return
+			}
+		} else if sync != nil && req.Branch == "" && sync.Branch != "" {
+			_ = workspaceMgr.UpdateGitHubMeta(accountID, ws.ID, fullName, sync.Branch)
+			ws.GitHubDefaultBranch = sync.Branch
+		}
+
+		_ = workspaceMgr.RefreshStats(ws)
+		fresh, _ := workspaceMgr.Get(accountID, ws.ID)
+		if fresh != nil {
+			ws = fresh
+		}
+
+		c.JSON(http.StatusOK, gin.H{"workspace": ws})
+	}
+}
+
+func handleGitHubPullWorkspace(gh *githubvcs.Service, workspaceMgr *workspace.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
 			return
 		}
-		tmp.Close()
-
-		if err := unzipGitHubZipball(tmpPath, ws.RootPath); err != nil {
-			_ = workspaceMgr.Delete(accountID, ws.ID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to extract repository: " + err.Error()})
+		if gh == nil || !gh.Configured() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "GitHub OAuth 未配置"})
+			return
+		}
+		wsID := strings.TrimSpace(c.Param("id"))
+		ws, err := workspaceMgr.Get(accountID, wsID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
+			return
+		}
+		if ws.Source != "github" || strings.TrimSpace(ws.GitHubFullName) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "workspace is not linked to a GitHub repository"})
+			return
+		}
+		result, err := gh.PullWorkspace(c.Request.Context(), accountID, ws.RootPath, ws.GitHubFullName, ws.GitHubDefaultBranch)
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "not connected") {
+				status = http.StatusUnauthorized
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
 			return
 		}
 		_ = workspaceMgr.RefreshStats(ws)
+		fresh, _ := workspaceMgr.Get(accountID, ws.ID)
+		c.JSON(http.StatusOK, gin.H{"result": result, "workspace": fresh})
+	}
+}
 
-		c.JSON(http.StatusOK, gin.H{"workspace": ws})
+func handleGitHubPushWorkspace(gh *githubvcs.Service, workspaceMgr *workspace.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID, ok := requireAccountID(c)
+		if !ok {
+			return
+		}
+		if gh == nil || !gh.Configured() {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "GitHub OAuth 未配置"})
+			return
+		}
+		wsID := strings.TrimSpace(c.Param("id"))
+		ws, err := workspaceMgr.Get(accountID, wsID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "workspace not found"})
+			return
+		}
+		if ws.Source != "github" || strings.TrimSpace(ws.GitHubFullName) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "workspace is not linked to a GitHub repository"})
+			return
+		}
+		var req struct {
+			Message string `json:"message"`
+			Branch  string `json:"branch"`
+		}
+		_ = c.ShouldBindJSON(&req)
+		branch := strings.TrimSpace(req.Branch)
+		if branch == "" {
+			branch = ws.GitHubDefaultBranch
+		}
+		result, err := gh.PushWorkspace(c.Request.Context(), accountID, ws.RootPath, ws.GitHubFullName, branch, req.Message)
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(err.Error(), "not connected") {
+				status = http.StatusUnauthorized
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return
+		}
+		if branch != "" && branch != ws.GitHubDefaultBranch {
+			_ = workspaceMgr.UpdateGitHubMeta(accountID, ws.ID, ws.GitHubFullName, branch)
+		}
+		_ = workspaceMgr.RefreshStats(ws)
+		fresh, _ := workspaceMgr.Get(accountID, ws.ID)
+		c.JSON(http.StatusOK, gin.H{"result": result, "workspace": fresh})
 	}
 }
 

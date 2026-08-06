@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
@@ -21,8 +22,18 @@ func TestSafeJoinAndUploadFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	now := time.Now()
+	_, err = database.Exec(`INSERT INTO users (username, password_hash, role, created_at, updated_at) VALUES ('u1', 'x', 'user', ?, ?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uid int64
+	if err := database.QueryRow(`SELECT id FROM users WHERE username = 'u1'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+
 	mgr := NewManager(database.DB, filepath.Join(dir, "ws"))
-	ws, err := mgr.CreateEmpty(1, "demo")
+	ws, err := mgr.CreateEmpty(uid, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
