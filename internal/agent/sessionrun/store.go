@@ -102,6 +102,57 @@ func (s *Store) ActiveRunForSession(sessionID string) (*Run, error) {
 	return run, err
 }
 
+// LatestRunForSession returns the most recent run for a session (any status).
+func (s *Store) LatestRunForSession(sessionID string) (*Run, error) {
+	run, err := scanRun(s.db.QueryRow(`
+		SELECT id, session_id, user_id, workspace_id, mode, model, status, trigger_message_id,
+			error, last_seq, cancel_requested, created_at, started_at, finished_at
+		FROM session_runs
+		WHERE session_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return run, err
+}
+
+// CollectToolSteps returns tool_step payloads in order for a run.
+func (s *Store) CollectToolSteps(runID string) ([]map[string]string, error) {
+	events, err := s.ListEventsAfter(runID, 0)
+	if err != nil {
+		return nil, err
+	}
+	steps := make([]map[string]string, 0)
+	for _, ev := range events {
+		if ev.Type != EventToolStep {
+			continue
+		}
+		var payload struct {
+			Step map[string]string `json:"step"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil || payload.Step == nil {
+			continue
+		}
+		steps = append(steps, payload.Step)
+	}
+	// Prefer done event's tool_steps if present (authoritative final list).
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != EventDone {
+			continue
+		}
+		var payload struct {
+			ToolSteps []map[string]string `json:"tool_steps"`
+		}
+		if err := json.Unmarshal(events[i].Payload, &payload); err == nil && len(payload.ToolSteps) > 0 {
+			return payload.ToolSteps, nil
+		}
+		break
+	}
+	return steps, nil
+}
+
 func (s *Store) ClaimNext() (*Run, error) {
 	now := time.Now().UTC()
 	run, err := scanRun(s.db.QueryRow(`

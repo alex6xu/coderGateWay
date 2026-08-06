@@ -4,6 +4,15 @@ import remarkGfm from 'remark-gfm'
 import { apiFetch, useAccount } from '../context/AccountContext'
 import VoiceInputButton from '../components/VoiceInputButton'
 import { useVoiceInput } from '../hooks/useVoiceInput'
+import {
+  attachToolStepsToMessages,
+  clearLocal,
+  coderSessionKey,
+  coderWorkspaceKey,
+  readLocal,
+  writeLocal,
+  type SessionRestorePayload,
+} from '../lib/sessionPersist'
 
 interface Message {
   id: string
@@ -110,18 +119,15 @@ export default function CoderPage() {
 
   const [runId, setRunId] = useState('')
   const runAbortRef = useRef<AbortController | null>(null)
+  const restoreGenRef = useRef(0)
 
-  const sessionStorageKey = currentAccount?.id
-    ? `cg_coder_session_${currentAccount.id}_${workspaceId || 'none'}`
-    : ''
+  const sessionStorageKey =
+    currentAccount?.id && workspaceId ? coderSessionKey(currentAccount.id, workspaceId) : ''
 
   useEffect(() => {
     fetchModels()
     fetchWorkspaces()
     fetchGitHubStatus()
-    setMessages([])
-    setSessionId('')
-    setRunId('')
 
     const params = new URLSearchParams(window.location.search)
     const gh = params.get('github')
@@ -143,54 +149,82 @@ export default function CoderPage() {
     }
   }, [currentAccount?.id])
 
+  // Persist selected workspace so returning to /code restores the same project.
+  useEffect(() => {
+    if (!currentAccount?.id || !workspaceId) return
+    writeLocal(coderWorkspaceKey(currentAccount.id), workspaceId)
+  }, [currentAccount?.id, workspaceId])
+
   // Restore session + active run after workspace is known
   useEffect(() => {
-    if (!currentAccount?.id || !sessionStorageKey) return
-    const saved = sessionStorage.getItem(sessionStorageKey)
-    if (!saved) return
+    if (!currentAccount?.id || !workspaceId || !sessionStorageKey) {
+      setMessages([])
+      setSessionId('')
+      setRunId('')
+      setIsLoading(false)
+      return
+    }
+
+    const saved =
+      readLocal(sessionStorageKey) ||
+      (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(sessionStorageKey) || '' : '')
+    if (!saved) {
+      setMessages([])
+      setSessionId('')
+      setRunId('')
+      setIsLoading(false)
+      return
+    }
+
+    const gen = ++restoreGenRef.current
     let cancelled = false
     ;(async () => {
       try {
         const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, currentAccount.id)
-        if (!res.ok || cancelled) return
-        const data = await res.json()
-        if (cancelled) return
+        if (!res.ok || cancelled || gen !== restoreGenRef.current) return
+        const data = (await res.json()) as SessionRestorePayload
+        if (cancelled || gen !== restoreGenRef.current) return
         setSessionId(saved)
-        const restored: Message[] = (data.messages || []).map(
-          (m: { id: string; role: string; content: string; model?: string; created_at?: string }) => ({
-            id: m.id,
-            role: m.role as Message['role'],
-            content: m.content || '',
-            timestamp: m.created_at ? new Date(m.created_at) : new Date(),
-            model: m.model,
-          }),
-        )
-        setMessages(restored)
-        const active = data.active_run as
-          | { id: string; status: string; last_seq: number; model?: string }
-          | undefined
+        writeLocal(sessionStorageKey, saved)
+
+        let restored: Message[] = (data.messages || []).map((m) => ({
+          id: m.id,
+          role: m.role as Message['role'],
+          content: m.content || '',
+          timestamp: m.created_at ? new Date(m.created_at) : new Date(),
+          model: m.model,
+        }))
+
+        const active = data.active_run
         if (active && (active.status === 'running' || active.status === 'queued')) {
-          setRunId(active.id)
-          setIsLoading(true)
           const assistantId = `run-${active.id}`
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === assistantId)) return prev
-            return [
-              ...prev,
+          if (!restored.some((m) => m.id === assistantId)) {
+            restored = [
+              ...restored,
               {
                 id: assistantId,
                 role: 'assistant',
                 content: '',
                 timestamp: new Date(),
                 model: active.model || selectedModel || undefined,
-                toolSteps: [],
+                toolSteps: data.active_run_tool_steps || [],
               },
             ]
-          })
+          } else {
+            restored = attachToolStepsToMessages(restored, data.active_run_tool_steps)
+          }
+          setMessages(restored)
+          setRunId(active.id)
+          setIsLoading(true)
           await consumeRunEvents(active.id, 0, assistantId, active.model)
+        } else {
+          restored = attachToolStepsToMessages(restored, data.latest_run_tool_steps)
+          setMessages(restored)
+          setRunId('')
+          setIsLoading(false)
         }
       } catch (e) {
-        console.error('restore session failed', e)
+        if (!cancelled) console.error('restore session failed', e)
       }
     })()
     return () => {
@@ -202,7 +236,12 @@ export default function CoderPage() {
 
   useEffect(() => {
     if (sessionId && sessionStorageKey) {
-      sessionStorage.setItem(sessionStorageKey, sessionId)
+      writeLocal(sessionStorageKey, sessionId)
+      try {
+        sessionStorage.setItem(sessionStorageKey, sessionId)
+      } catch {
+        /* ignore */
+      }
     }
   }, [sessionId, sessionStorageKey])
 
@@ -348,9 +387,16 @@ export default function CoderPage() {
       setWorkspaces(list)
       if (list.length > 0) {
         const requestedWorkspaceID = new URLSearchParams(window.location.search).get('workspace')
+        const savedWorkspaceID = currentAccount?.id ? readLocal(coderWorkspaceKey(currentAccount.id)) : ''
         setWorkspaceId((prev) => {
-          if (requestedWorkspaceID && list.some((workspace) => workspace.id === requestedWorkspaceID)) return requestedWorkspaceID
-          return prev && list.some((workspace) => workspace.id === prev) ? prev : list[0].id
+          if (requestedWorkspaceID && list.some((workspace) => workspace.id === requestedWorkspaceID)) {
+            return requestedWorkspaceID
+          }
+          if (prev && list.some((workspace) => workspace.id === prev)) return prev
+          if (savedWorkspaceID && list.some((workspace) => workspace.id === savedWorkspaceID)) {
+            return savedWorkspaceID
+          }
+          return list[0].id
         })
       } else {
         setWorkspaceId('')
@@ -752,7 +798,14 @@ export default function CoderPage() {
     setSessionId('')
     setRunId('')
     setIsLoading(false)
-    if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey)
+    if (sessionStorageKey) {
+      clearLocal(sessionStorageKey)
+      try {
+        sessionStorage.removeItem(sessionStorageKey)
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   const downloadWorkspace = () => {
@@ -791,7 +844,14 @@ export default function CoderPage() {
         setUploadError(data.error || '删除工作区失败')
         return
       }
-      if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey)
+      if (sessionStorageKey) {
+        clearLocal(sessionStorageKey)
+        try {
+          sessionStorage.removeItem(sessionStorageKey)
+        } catch {
+          /* ignore */
+        }
+      }
       setSessionId('')
       setRunId('')
       setIsLoading(false)

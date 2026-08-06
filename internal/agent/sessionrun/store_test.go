@@ -102,3 +102,43 @@ func TestRecoverInterrupted(t *testing.T) {
 		t.Fatalf("got %+v %v", got, err)
 	}
 }
+
+func TestLatestRunAndCollectToolSteps(t *testing.T) {
+	st := openStore(t)
+	run, err := st.CreateQueued(CreateRunInput{SessionID: "s1", UserID: 1, Mode: "coder", TriggerMessageID: "m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AppendEvent(run.ID, EventToolStep, map[string]interface{}{
+		"step": map[string]string{"tool": "read_file", "args": "{}", "result": "ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AppendEvent(run.ID, EventDone, map[string]interface{}{
+		"content": "done",
+		"tool_steps": []map[string]string{
+			{"tool": "read_file", "args": "{}", "result": "ok"},
+			{"tool": "write_file", "args": "{}", "result": "wrote"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Finish(run.ID, StatusSucceeded, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	latest, err := st.LatestRunForSession("s1")
+	if err != nil || latest == nil || latest.ID != run.ID {
+		t.Fatalf("latest: %+v %v", latest, err)
+	}
+	active, err := st.ActiveRunForSession("s1")
+	if err != nil || active != nil {
+		t.Fatalf("expected no active run, got %+v %v", active, err)
+	}
+	steps, err := st.CollectToolSteps(run.ID)
+	if err != nil || len(steps) != 2 || steps[1]["tool"] != "write_file" {
+		t.Fatalf("steps=%v err=%v", steps, err)
+	}
+}
