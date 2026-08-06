@@ -298,10 +298,12 @@ codegateway/
 
 ### 优先待办（近期反馈）
 
+> 展开说明见 [`docs/todos-session-knowledge-tool-loop.md`](docs/todos-session-knowledge-tool-loop.md)。
+
 - [ ] **切换会话后恢复内容** — 页面导航恢复（localStorage + run 重连）已有；会话列表切换时仍需完整还原：历史消息、工具步骤面板、进行中/最近 run 事件流。涉及 `CoderPage` / `ChatPage`、session API、`sessionPersist`。
 - [ ] **构建本地知识库 / 知识图谱** — 在现有 FTS5 之上规划：sqlite-vec 向量检索、graphify 风格实体关系图、可选 Obsidian vault 导入/导出。目标：对话与代码上下文沉淀为可浏览、可检索的本地知识资产。
 - [ ] **工具调用循环超限** — 现状：触顶直接 `max tool iterations reached`。改进方向：
-  - 文档与默认值：一般改代码建议 `max_iterations: 24`～`32`（当前 yaml 默认偏低时易触顶）
+  - 文档与默认值：一般改代码建议 `max_iterations: 24`～`32`（`codegateway.yaml` 已调至 24）
   - 产品：触顶时返回已产生的过程输出 +「继续」续跑，或强制让模型基于已有工具结果做摘要收束
   - 可观测：Channels「请求日志」已可审计每轮 LLM 调用，便于排查空转
 
