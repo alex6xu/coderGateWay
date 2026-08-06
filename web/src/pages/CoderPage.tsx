@@ -699,6 +699,39 @@ export default function CoderPage() {
       .catch((err) => console.error(err))
   }
 
+  const deleteWorkspace = async () => {
+    if (!workspaceId || !activeWorkspace) return
+    const label = activeWorkspace.github_full_name || activeWorkspace.name
+    if (!confirm(`确认删除云端工作区「${label}」？\n将同时删除数据库记录与服务器上的文件，且不可恢复。`)) {
+      return
+    }
+    setUploadError('')
+    try {
+      const response = await apiFetch(`/v1/workspaces/${workspaceId}`, { method: 'DELETE' }, currentAccount?.id)
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setUploadError(data.error || '删除工作区失败')
+        return
+      }
+      if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey)
+      setSessionId('')
+      setRunId('')
+      setIsLoading(false)
+      runAbortRef.current?.abort()
+      await fetchWorkspaces()
+      setMessages([
+        {
+          id: Date.now().toString(),
+          role: 'system',
+          content: `已删除云端工作区「${label}」。`,
+          timestamp: new Date(),
+        },
+      ])
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : '删除工作区失败')
+    }
+  }
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -787,12 +820,20 @@ export default function CoderPage() {
           ))}
         </select>
         {workspaceId && (
-          <button
-            onClick={downloadWorkspace}
-            className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent text-muted-foreground"
-          >
-            下载修改后的 zip
-          </button>
+          <>
+            <button
+              onClick={downloadWorkspace}
+              className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent text-muted-foreground"
+            >
+              下载修改后的 zip
+            </button>
+            <button
+              onClick={() => void deleteWorkspace()}
+              className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-destructive/10 text-destructive"
+            >
+              删除工作区
+            </button>
+          </>
         )}
         {activeWorkspace && (
           <span className="text-[11px] text-muted-foreground">
