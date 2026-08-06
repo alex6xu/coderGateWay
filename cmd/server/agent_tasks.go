@@ -170,5 +170,5 @@ func resolveAgentTaskProvider(database *db.DB, userID, profileID int64) (provide
 	if err != nil {
 		return nil, "", fmt.Errorf("create provider: %w", err)
 	}
-	return prov, candidate.model, nil
+	return wrapProviderWithRequestLog(database, userID, candidate.channel, prov), candidate.model, nil
 }

@@ -91,7 +91,7 @@ const channelTypeOptions = [
   { value: 99, label: 'Custom' },
 ]
 
-type Tab = 'endpoints' | 'providers'
+type Tab = 'endpoints' | 'providers' | 'request-logs'
 
 export default function ChannelsPage() {
   const { currentAccount } = useAccount()
@@ -112,10 +112,12 @@ export default function ChannelsPage() {
       <div className="flex gap-1 mb-5 border-b border-border">
         <TabButton active={tab === 'endpoints'} onClick={() => setTab('endpoints')}>端点管理</TabButton>
         <TabButton active={tab === 'providers'} onClick={() => setTab('providers')}>提供商</TabButton>
+        <TabButton active={tab === 'request-logs'} onClick={() => setTab('request-logs')}>请求日志</TabButton>
       </div>
 
       {tab === 'endpoints' && <EndpointManager accountId={currentAccount?.id} />}
       {tab === 'providers' && <ProvidersPage accountId={currentAccount?.id} />}
+      {tab === 'request-logs' && <RequestLogsPage accountId={currentAccount?.id} />}
     </div>
   )
 }
@@ -1057,6 +1059,263 @@ function ProviderSection({
           </tbody>
         </table>
       )}
+    </div>
+  )
+}
+
+// ============ LLM Request Logs ============
+
+interface RequestLogSummary {
+  id: string
+  channel_id?: number
+  channel_name?: string
+  model: string
+  stream: boolean
+  status_code: number
+  error?: string
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  latency_ms: number
+  created_at: string
+}
+
+interface RequestLogDetail extends RequestLogSummary {
+  request_body?: string
+  response_body?: string
+  user_id?: number
+}
+
+function formatJSON(raw?: string) {
+  if (!raw) return ''
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+function RequestLogsPage({ accountId }: { accountId?: number }) {
+  const [logs, setLogs] = useState<RequestLogSummary[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [modelFilter, setModelFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detail, setDetail] = useState<RequestLogDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+
+  const fetchLogs = async () => {
+    if (!accountId) return
+    setLoading(true)
+    setError('')
+    try {
+      const params = new URLSearchParams({ limit: '50', offset: '0' })
+      if (modelFilter.trim()) params.set('model', modelFilter.trim())
+      if (statusFilter.trim()) params.set('status', statusFilter.trim())
+      const res = await apiFetch(`/v1/admin/request-logs?${params}`, {}, accountId)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error || '加载请求日志失败')
+        return
+      }
+      setLogs(data.logs || [])
+    } catch (e) {
+      console.error(e)
+      setError('加载请求日志失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void fetchLogs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId])
+
+  const openDetail = async (id: string) => {
+    setSelectedId(id)
+    setDetail(null)
+    setDetailLoading(true)
+    try {
+      const res = await apiFetch(`/v1/admin/request-logs/${id}`, {}, accountId)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error || '加载详情失败')
+        return
+      }
+      setDetail(data)
+    } catch (e) {
+      console.error(e)
+      setError('加载详情失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-card border border-border rounded-xl p-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-[12px] text-muted-foreground mb-1">模型</label>
+            <input
+              value={modelFilter}
+              onChange={(e) => setModelFilter(e.target.value)}
+              placeholder="例如 gpt-4o"
+              className="h-9 w-48 px-3 bg-background border border-border rounded-lg text-[13px]"
+            />
+          </div>
+          <div>
+            <label className="block text-[12px] text-muted-foreground mb-1">状态码</label>
+            <input
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              placeholder="200 / 500"
+              className="h-9 w-28 px-3 bg-background border border-border rounded-lg text-[13px]"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchLogs()}
+            disabled={loading}
+            className="h-9 px-4 bg-primary text-primary-foreground rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50"
+          >
+            {loading ? '加载中…' : '刷新'}
+          </button>
+          <p className="text-[12px] text-muted-foreground pb-2">
+            展示网关 LLM 调用的请求/响应审计日志（含 Chat Completions 与 Agent）
+          </p>
+        </div>
+        {error && <p className="mt-3 text-[12px] text-destructive">{error}</p>}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-border">
+            <p className="text-[13px] font-medium text-foreground">最近请求</p>
+          </div>
+          <div className="max-h-[70vh] overflow-auto">
+            {logs.length === 0 && !loading ? (
+              <p className="px-4 py-10 text-center text-[13px] text-muted-foreground">暂无请求日志</p>
+            ) : (
+              <table className="w-full">
+                <thead className="sticky top-0 bg-card">
+                  <tr className="border-b border-border text-left">
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">时间</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">模型</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">渠道</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">状态</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">耗时</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">Tokens</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs.map((log) => (
+                    <tr
+                      key={log.id}
+                      onClick={() => void openDetail(log.id)}
+                      className={`border-b border-border cursor-pointer hover:bg-accent/50 ${
+                        selectedId === log.id ? 'bg-accent/40' : ''
+                      }`}
+                    >
+                      <td className="px-3 py-2 text-[12px] text-muted-foreground whitespace-nowrap">
+                        {new Date(log.created_at).toLocaleString()}
+                      </td>
+                      <td className="px-3 py-2 text-[12px] text-foreground font-mono max-w-[140px] truncate">
+                        {log.model || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-[12px] text-muted-foreground max-w-[120px] truncate">
+                        {log.channel_name || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-[12px]">
+                        <span
+                          className={
+                            log.status_code >= 200 && log.status_code < 300
+                              ? 'text-success'
+                              : 'text-destructive'
+                          }
+                        >
+                          {log.status_code || '-'}
+                        </span>
+                        {log.stream ? (
+                          <span className="ml-1 text-[10px] text-muted-foreground">stream</span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 text-[12px] text-muted-foreground tabular-nums">
+                        {log.latency_ms}ms
+                      </td>
+                      <td className="px-3 py-2 text-[12px] text-muted-foreground tabular-nums">
+                        {log.prompt_tokens}+{log.completion_tokens}
+                        {log.cached_tokens ? ` (c${log.cached_tokens})` : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl overflow-hidden min-h-[320px]">
+          <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-2">
+            <p className="text-[13px] font-medium text-foreground">请求详情</p>
+            {detail?.id && (
+              <span className="text-[11px] text-muted-foreground font-mono truncate">{detail.id}</span>
+            )}
+          </div>
+          <div className="p-4 max-h-[70vh] overflow-auto space-y-4">
+            {!selectedId && (
+              <p className="text-[13px] text-muted-foreground">选择左侧一条日志查看请求/响应正文</p>
+            )}
+            {selectedId && detailLoading && (
+              <p className="text-[13px] text-muted-foreground">加载详情…</p>
+            )}
+            {detail && !detailLoading && (
+              <>
+                <div className="grid grid-cols-2 gap-2 text-[12px]">
+                  <div>
+                    <span className="text-muted-foreground">模型</span>
+                    <p className="font-mono text-foreground break-all">{detail.model}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">渠道</span>
+                    <p className="text-foreground break-all">{detail.channel_name || '-'}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">状态</span>
+                    <p className="text-foreground">{detail.status_code}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">耗时</span>
+                    <p className="text-foreground">{detail.latency_ms} ms</p>
+                  </div>
+                </div>
+                {detail.error && (
+                  <div>
+                    <p className="text-[12px] font-medium text-destructive mb-1">错误</p>
+                    <pre className="text-[11px] whitespace-pre-wrap break-words bg-destructive/10 border border-destructive/30 rounded-lg p-3">
+                      {detail.error}
+                    </pre>
+                  </div>
+                )}
+                <div>
+                  <p className="text-[12px] font-medium text-foreground mb-1">Request</p>
+                  <pre className="text-[11px] whitespace-pre-wrap break-words bg-background border border-border rounded-lg p-3 max-h-64 overflow-auto">
+                    {formatJSON(detail.request_body) || '(empty)'}
+                  </pre>
+                </div>
+                <div>
+                  <p className="text-[12px] font-medium text-foreground mb-1">Response</p>
+                  <pre className="text-[11px] whitespace-pre-wrap break-words bg-background border border-border rounded-lg p-3 max-h-80 overflow-auto">
+                    {formatJSON(detail.response_body) || '(empty)'}
+                  </pre>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
