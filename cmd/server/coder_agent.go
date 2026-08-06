@@ -72,17 +72,29 @@ func runCoderAgent(
 	var usage provider.Usage
 	var steps []map[string]string
 	didCompact := false
+	var processOut strings.Builder
 	emit := func(ev AgentEvent) {
 		if opt.OnEvent != nil {
 			opt.OnEvent(ev)
 		}
+	}
+	appendProcess := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		if processOut.Len() > 0 {
+			processOut.WriteString("\n\n")
+		}
+		processOut.WriteString(text)
+		emit(AgentEvent{Type: "delta", Content: text + "\n\n"})
 	}
 
 	for i := 0; i < opt.MaxIterations; i++ {
 		if opt.ShouldCancel != nil && opt.ShouldCancel() {
 			err := fmt.Errorf("cancelled")
 			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return "", usage, steps, didCompact, err
+			return processOut.String(), usage, steps, didCompact, err
 		}
 		if opt.InjectPending != nil {
 			if extra := opt.InjectPending(); len(extra) > 0 {
@@ -103,7 +115,7 @@ func runCoderAgent(
 		}
 		if berr != nil {
 			emit(AgentEvent{Type: "error", Content: berr.Error()})
-			return "", usage, steps, didCompact, berr
+			return processOut.String(), usage, steps, didCompact, berr
 		}
 
 		temp := opt.Temperature
@@ -122,7 +134,7 @@ func runCoderAgent(
 		resp, err := prov.ChatCompletion(ctx, req)
 		if err != nil {
 			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return "", usage, steps, didCompact, err
+			return processOut.String(), usage, steps, didCompact, err
 		}
 
 		usage.Add(resp.Usage)
@@ -130,15 +142,21 @@ func runCoderAgent(
 		if len(resp.Choices) == 0 {
 			err := fmt.Errorf("empty model response")
 			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return "", usage, steps, didCompact, err
+			return processOut.String(), usage, steps, didCompact, err
 		}
 
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
-			if msg.Content != "" {
-				emit(AgentEvent{Type: "delta", Content: msg.Content})
+			final := strings.TrimSpace(msg.Content)
+			if final != "" {
+				appendProcess(final)
 			}
-			return msg.Content, usage, steps, didCompact, nil
+			return strings.TrimSpace(processOut.String()), usage, steps, didCompact, nil
+		}
+
+		// Intermediate thinking / narration before tool calls — surface to the UI fully.
+		if strings.TrimSpace(msg.Content) != "" {
+			appendProcess(msg.Content)
 		}
 
 		messages = append(messages, msg)
@@ -150,7 +168,11 @@ func runCoderAgent(
 
 	err := fmt.Errorf("max tool iterations reached; try a more specific request")
 	emit(AgentEvent{Type: "error", Content: err.Error()})
-	return "", usage, steps, didCompact, err
+	out := strings.TrimSpace(processOut.String())
+	if out == "" {
+		out = err.Error()
+	}
+	return out, usage, steps, didCompact, err
 }
 
 func executeToolCalls(
@@ -195,7 +217,8 @@ func executeToolCalls(
 		step := map[string]string{
 			"tool":   tc.Function.Name,
 			"args":   raw,
-			"result": truncate(content, 2000),
+			// UI gets the full tool output; model context still uses TruncateToolResult above.
+			"result": content,
 		}
 		log.Printf("[coder] tool=%s workspace=%s", tc.Function.Name, workspaceID)
 		return result{
@@ -261,13 +284,6 @@ func toProviderTools(registry *tool.ToolRegistry) []provider.Tool {
 		})
 	}
 	return out
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 func coderSystemPrompt(modelName, workspaceName string) string {

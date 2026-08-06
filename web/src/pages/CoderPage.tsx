@@ -308,7 +308,7 @@ export default function CoderPage() {
             applyAssistant({ content: fullText, model: ev.model || fallbackModel || selectedModel })
           } else if (ev.type === 'tool_step' && ev.step) {
             steps.push(ev.step)
-            applyAssistant({ toolSteps: [...steps] })
+            applyAssistant({ toolSteps: [...steps], content: fullText || undefined })
           } else if (ev.type === 'user_injected' && ev.content) {
             setMessages((prev) => {
               if (prev.some((m) => m.content === ev.content && m.role === 'user')) return prev
@@ -323,6 +323,7 @@ export default function CoderPage() {
               ]
             })
           } else if (ev.type === 'done') {
+            // Prefer authoritative final transcript when present; otherwise keep streamed text.
             if (ev.content) fullText = ev.content
             if (ev.tool_steps?.length) {
               steps.splice(0, steps.length, ...ev.tool_steps)
@@ -333,8 +334,10 @@ export default function CoderPage() {
               toolSteps: steps.length ? [...steps] : undefined,
             })
           } else if (ev.type === 'error') {
-            fullText = ev.content || 'Agent error'
-            applyAssistant({ content: fullText })
+            const errText = ev.content || 'Agent error'
+            if (fullText) fullText = `${fullText}\n\n⚠️ ${errText}`
+            else fullText = errText
+            applyAssistant({ content: fullText, toolSteps: steps.length ? [...steps] : undefined })
           }
         }
       }
@@ -347,7 +350,7 @@ export default function CoderPage() {
         setRunId('')
       }
     }
-    if (!fullText) {
+    if (!fullText && steps.length === 0) {
       applyAssistant({ content: 'No response' })
     } else if (fullText.includes('no available channel')) {
       applyAssistant({
@@ -1145,15 +1148,30 @@ export default function CoderPage() {
                   </div>
                 )}
                 {msg.toolSteps && msg.toolSteps.length > 0 && (
-                  <details className="mt-2 text-[11px] text-muted-foreground">
-                    <summary className="cursor-pointer">工具调用 {msg.toolSteps.length} 步</summary>
-                    <ul className="mt-1 space-y-1">
+                  <details open className="mt-3 text-[12px] text-muted-foreground border-t border-border/60 pt-2">
+                    <summary className="cursor-pointer text-foreground/80 font-medium">
+                      执行过程 · {msg.toolSteps.length} 步工具调用
+                    </summary>
+                    <div className="mt-2 space-y-2">
                       {msg.toolSteps.map((s, idx) => (
-                        <li key={idx} className="font-mono truncate">
-                          {s.tool}
-                        </li>
+                        <details key={`${msg.id}-step-${idx}`} className="rounded-lg border border-border/70 bg-background/60 px-2.5 py-2">
+                          <summary className="cursor-pointer font-mono text-[11px] text-foreground break-all">
+                            {idx + 1}. {s.tool}
+                            {s.args ? ` (${s.args.length > 80 ? `${s.args.slice(0, 80)}…` : s.args})` : ''}
+                          </summary>
+                          {s.args && (
+                            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">
+                              {s.args}
+                            </pre>
+                          )}
+                          {s.result && (
+                            <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 text-[11px] text-foreground/90">
+                              {s.result}
+                            </pre>
+                          )}
+                        </details>
                       ))}
-                    </ul>
+                    </div>
                   </details>
                 )}
                 <div
