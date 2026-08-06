@@ -244,6 +244,7 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 
 				admin.GET("/channels", handleListChannels(database))
 				admin.POST("/channels", handleCreateChannel(database))
+				admin.POST("/channels/fetch-models", handleProbeChannelModels())
 				admin.PUT("/channels/:id", handleUpdateChannel(database))
 				admin.DELETE("/channels/:id", handleDeleteChannel(database))
 				admin.PUT("/channels/:id/set-default", handleSetDefaultChannel(database))

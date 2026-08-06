@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -180,23 +181,36 @@ func modelsForChannel(ctx context.Context, ch *model.Channel) []string {
 	}
 
 	// Fall back to upstream OpenAI-compatible /models when channel has no explicit list.
-	if !supportsUpstreamModelList(ch.Type) || strings.TrimSpace(ch.Key) == "" {
-		return nil
-	}
-
-	prov, err := createProviderFromChannel(ch)
-	if err != nil {
-		return nil
-	}
-
-	listCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
-	ids, err := prov.ListModels(listCtx)
+	ids, err := listUpstreamModels(ctx, ch)
 	if err != nil {
 		return nil
 	}
 	return ids
+}
+
+// listUpstreamModels always queries the provider's model list API (ignores saved channel.Models).
+func listUpstreamModels(ctx context.Context, ch *model.Channel) ([]string, error) {
+	if !supportsUpstreamModelList(ch.Type) {
+		return nil, fmt.Errorf("channel type does not support upstream model list")
+	}
+	// OAuth channels may have an empty key; createProviderFromChannel fills the token.
+	if strings.TrimSpace(ch.Key) == "" && !strings.EqualFold(ch.AuthMode, "oauth") {
+		return nil, fmt.Errorf("api key is required to fetch models")
+	}
+
+	prov, err := createProviderFromChannel(ch)
+	if err != nil {
+		return nil, err
+	}
+
+	listCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	ids, err := prov.ListModels(listCtx)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeModelIDs(ids), nil
 }
 
 func parseModelsJSON(raw string) []string {
