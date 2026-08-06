@@ -146,17 +146,17 @@ func runCoderAgent(
 		}
 
 		msg := resp.Choices[0].Message
+		visible := msg.VisibleText()
 		if len(msg.ToolCalls) == 0 {
-			final := strings.TrimSpace(msg.Content)
-			if final != "" {
-				appendProcess(final)
+			if visible != "" {
+				appendProcess(visible)
 			}
 			return strings.TrimSpace(processOut.String()), usage, steps, didCompact, nil
 		}
 
 		// Intermediate thinking / narration before tool calls — surface to the UI fully.
-		if strings.TrimSpace(msg.Content) != "" {
-			appendProcess(msg.Content)
+		if visible != "" {
+			appendProcess(visible)
 		}
 
 		messages = append(messages, msg)

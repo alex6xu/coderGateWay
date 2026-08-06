@@ -67,6 +67,7 @@ type claudeSSEEvent struct {
 	Delta *struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
@@ -190,6 +191,25 @@ func (p *ClaudeProvider) readClaudeSSE(ctx context.Context, r io.Reader, fallbac
 					Choices: []ChunkChoice{{
 						Index: 0,
 						Delta: MessageDelta{Content: ev.Delta.Text},
+					}},
+				}) {
+					return
+				}
+			case "thinking_delta":
+				piece := ev.Delta.Thinking
+				if piece == "" {
+					piece = ev.Delta.Text
+				}
+				if piece == "" {
+					continue
+				}
+				if !emit(&ChatCompletionChunk{
+					ID:     msgID,
+					Object: "chat.completion.chunk",
+					Model:  model,
+					Choices: []ChunkChoice{{
+						Index: 0,
+						Delta: MessageDelta{Content: piece, ReasoningContent: piece},
 					}},
 				}) {
 					return

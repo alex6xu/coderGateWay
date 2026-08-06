@@ -68,6 +68,9 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	result.Usage.Normalize()
+	for i := range result.Choices {
+		result.Choices[i].Message.MergeReasoningIntoContent()
+	}
 
 	return &result, nil
 }
@@ -127,6 +130,12 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 				var chunk ChatCompletionChunk
 				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 					continue
+				}
+				for i := range chunk.Choices {
+					d := &chunk.Choices[i].Delta
+					if d.Content == "" && d.ReasoningContent != "" {
+						d.Content = d.ReasoningContent
+					}
 				}
 
 				select {
