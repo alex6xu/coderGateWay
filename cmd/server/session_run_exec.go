@@ -226,9 +226,16 @@ func (rt *sessionRunRuntime) execute(ctx context.Context, run *sessionrun.Run) e
 					if chunk.Usage != nil {
 						usage.Add(*chunk.Usage)
 					}
-					if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-						b.WriteString(chunk.Choices[0].Delta.Content)
-						rt.emit(run, sessionrun.EventDelta, AgentEvent{Content: chunk.Choices[0].Delta.Content})
+					if len(chunk.Choices) > 0 {
+						delta := chunk.Choices[0].Delta
+						piece := delta.Content
+						if piece == "" {
+							piece = delta.ReasoningContent
+						}
+						if piece != "" {
+							b.WriteString(piece)
+							rt.emit(run, sessionrun.EventDelta, AgentEvent{Content: piece})
+						}
 					}
 				}
 				responseContent = b.String()

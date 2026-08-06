@@ -308,7 +308,9 @@ export default function CoderPage() {
             applyAssistant({ content: fullText, model: ev.model || fallbackModel || selectedModel })
           } else if (ev.type === 'tool_step' && ev.step) {
             steps.push(ev.step)
-            applyAssistant({ toolSteps: [...steps], content: fullText || undefined })
+            const patch: Partial<Message> = { toolSteps: [...steps] }
+            if (fullText) patch.content = fullText
+            applyAssistant(patch)
           } else if (ev.type === 'user_injected' && ev.content) {
             setMessages((prev) => {
               if (prev.some((m) => m.content === ev.content && m.role === 'user')) return prev
@@ -1144,7 +1146,13 @@ export default function CoderPage() {
                   <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                 ) : (
                   <div className="markdown-body text-[13px]">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    {msg.content ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    ) : msg.toolSteps && msg.toolSteps.length > 0 ? (
+                      <p className="text-muted-foreground text-[12px]">正在调用工具…</p>
+                    ) : isLoading ? (
+                      <p className="text-muted-foreground text-[12px]">模型输出中…</p>
+                    ) : null}
                   </div>
                 )}
                 {msg.toolSteps && msg.toolSteps.length > 0 && (

@@ -798,6 +798,8 @@ func (a *streamAggregator) consume(chunk *provider.ChatCompletionChunk) {
 	}
 	if ch.Delta.Content != "" {
 		a.content.WriteString(ch.Delta.Content)
+	} else if ch.Delta.ReasoningContent != "" {
+		a.content.WriteString(ch.Delta.ReasoningContent)
 	}
 	for _, tc := range ch.Delta.ToolCalls {
 		idx := 0

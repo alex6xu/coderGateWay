@@ -51,12 +51,46 @@ type StreamOptions struct {
 
 // Message represents a chat message
 type Message struct {
-	Role         string        `json:"role"`
-	Content      string        `json:"content"`
-	Name         string        `json:"name,omitempty"`
-	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID   string        `json:"tool_call_id,omitempty"`
-	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	Role             string        `json:"role"`
+	Content          string        `json:"content"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Name             string        `json:"name,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	CacheControl     *CacheControl `json:"cache_control,omitempty"`
+}
+
+// VisibleText returns text that should be shown to users (reasoning/thinking + content).
+func (m Message) VisibleText() string {
+	reasoning := strings.TrimSpace(m.ReasoningContent)
+	content := strings.TrimSpace(m.Content)
+	switch {
+	case reasoning != "" && content != "" && reasoning != content:
+		return reasoning + "\n\n" + content
+	case content != "":
+		return content
+	default:
+		return reasoning
+	}
+}
+
+// MergeReasoningIntoContent copies reasoning_content into Content when useful for
+// downstream code that only reads Content (without dropping the reasoning field).
+func (m *Message) MergeReasoningIntoContent() {
+	if m == nil {
+		return
+	}
+	rc := strings.TrimSpace(m.ReasoningContent)
+	if rc == "" {
+		return
+	}
+	if strings.TrimSpace(m.Content) == "" {
+		m.Content = rc
+		return
+	}
+	if !strings.Contains(m.Content, rc) {
+		m.Content = rc + "\n\n" + m.Content
+	}
 }
 
 // CacheControl marks a message/block for provider-side prompt caching (Anthropic-style).
@@ -158,9 +192,10 @@ type ChunkChoice struct {
 
 // MessageDelta represents a delta in a streaming message
 type MessageDelta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ApplyPromptCache sets OpenAI-compatible cache key and Anthropic-style markers on

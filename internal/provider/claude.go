@@ -70,11 +70,12 @@ type claudeResponse struct {
 	Model      string `json:"model"`
 	StopReason string `json:"stop_reason"`
 	Content    []struct {
-		Type  string          `json:"type"`
-		Text  string          `json:"text,omitempty"`
-		ID    string          `json:"id,omitempty"`
-		Name  string          `json:"name,omitempty"`
-		Input json.RawMessage `json:"input,omitempty"`
+		Type     string          `json:"type"`
+		Text     string          `json:"text,omitempty"`
+		Thinking string          `json:"thinking,omitempty"`
+		ID       string          `json:"id,omitempty"`
+		Name     string          `json:"name,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
 	} `json:"content"`
 	Usage struct {
 		InputTokens              int `json:"input_tokens"`
@@ -317,10 +318,21 @@ func (p *ClaudeProvider) setOAuthHeaders(httpReq *http.Request, req *ChatComplet
 func convertClaudeResponse(cr *claudeResponse) *ChatCompletionResponse {
 	msg := Message{Role: "assistant"}
 	var textParts []string
+	var thinkingParts []string
 	for _, c := range cr.Content {
 		switch c.Type {
 		case "text":
-			textParts = append(textParts, c.Text)
+			if strings.TrimSpace(c.Text) != "" {
+				textParts = append(textParts, c.Text)
+			}
+		case "thinking", "redacted_thinking":
+			th := c.Thinking
+			if strings.TrimSpace(th) == "" {
+				th = c.Text
+			}
+			if strings.TrimSpace(th) != "" {
+				thinkingParts = append(thinkingParts, th)
+			}
 		case "tool_use":
 			args := string(c.Input)
 			if args == "" {
@@ -337,6 +349,9 @@ func convertClaudeResponse(cr *claudeResponse) *ChatCompletionResponse {
 		}
 	}
 	msg.Content = strings.Join(textParts, "\n")
+	msg.ReasoningContent = strings.Join(thinkingParts, "\n")
+	// Ensure coder/UI paths that only read Content still see model narration.
+	msg.MergeReasoningIntoContent()
 	finish := mapClaudeStopReason(cr.StopReason)
 	usage := Usage{
 		PromptTokens:     cr.Usage.InputTokens,

@@ -209,7 +209,9 @@ export default function ChatPage() {
             applyAssistant({ content: fullText, model: ev.model || fallbackModel })
           } else if (ev.type === 'tool_step' && ev.step) {
             steps.push(ev.step)
-            applyAssistant({ toolSteps: [...steps], content: fullText || undefined })
+            const patch: Partial<Message> = { toolSteps: [...steps] }
+            if (fullText) patch.content = fullText
+            applyAssistant(patch)
           } else if (ev.type === 'done') {
             if (ev.content) fullText = ev.content
             if (ev.tool_steps?.length) {
