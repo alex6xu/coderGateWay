@@ -197,7 +197,14 @@ func (m *Manager) RefreshStats(ws *Workspace) error {
 	var count int
 	var size int64
 	_ = filepath.Walk(ws.RootPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if base == ".git" || base == "node_modules" || base == ".svn" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		count++
@@ -214,6 +221,24 @@ func (m *Manager) RefreshStats(ws *Workspace) error {
 	ws.FileCount = count
 	ws.SizeBytes = size
 	ws.UpdatedAt = now
+	return nil
+}
+
+// UpdateGitHubMeta updates github linkage fields for a workspace.
+func (m *Manager) UpdateGitHubMeta(accountID int64, id, fullName, branch string) error {
+	now := time.Now()
+	res, err := m.db.Exec(`
+		UPDATE workspaces
+		SET github_full_name = ?, github_default_branch = ?, source = 'github', updated_at = ?
+		WHERE id = ? AND user_id = ?
+	`, fullName, branch, now, id, accountID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("workspace not found")
+	}
 	return nil
 }
 

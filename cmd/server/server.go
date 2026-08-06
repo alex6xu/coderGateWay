@@ -225,6 +225,8 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 				ghAPI.DELETE("/disconnect", handleGitHubDisconnect(ghSvc))
 				ghAPI.GET("/repos", handleGitHubListRepos(ghSvc))
 				ghAPI.POST("/import", handleGitHubImportRepo(ghSvc, workspaceMgr))
+				ghAPI.POST("/workspaces/:id/pull", handleGitHubPullWorkspace(ghSvc, workspaceMgr))
+				ghAPI.POST("/workspaces/:id/push", handleGitHubPushWorkspace(ghSvc, workspaceMgr))
 			}
 
 			claudeAPI := protected.Group("/claude/oauth")
