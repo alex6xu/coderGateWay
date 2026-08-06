@@ -1229,6 +1229,14 @@ func handleGetSession(database *db.DB, rt *sessionRunRuntime) gin.HandlerFunc {
 			if active, err := rt.store.ActiveRunForSession(id); err == nil && active != nil {
 				resp["active_run"] = active
 				resp["last_event_seq"] = active.LastSeq
+				if steps, err := rt.store.CollectToolSteps(active.ID); err == nil && len(steps) > 0 {
+					resp["active_run_tool_steps"] = steps
+				}
+			} else if latest, err := rt.store.LatestRunForSession(id); err == nil && latest != nil {
+				resp["latest_run"] = latest
+				if steps, err := rt.store.CollectToolSteps(latest.ID); err == nil && len(steps) > 0 {
+					resp["latest_run_tool_steps"] = steps
+				}
 			}
 		}
 		c.JSON(http.StatusOK, resp)

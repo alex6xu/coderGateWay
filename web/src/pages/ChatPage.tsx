@@ -1,14 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiFetch, useAccount } from '../context/AccountContext'
-import { getAuthToken } from '../context/AuthContext'
 import VoiceInputButton from '../components/VoiceInputButton'
 import { useVoiceInput } from '../hooks/useVoiceInput'
+import {
+  attachToolStepsToMessages,
+  chatSessionKey,
+  clearLocal,
+  readLocal,
+  writeLocal,
+  type SessionRestorePayload,
+} from '../lib/sessionPersist'
 
 interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: Date
+  model?: string
+  toolSteps?: { tool: string; args: string; result: string }[]
 }
 
 export default function ChatPage() {
@@ -16,93 +25,113 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [ws, setWs] = useState<WebSocket | null>(null)
   const [connected, setConnected] = useState(false)
   const [sessionId, setSessionId] = useState('')
+  const [runId, setRunId] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
+  const runAbortRef = useRef<AbortController | null>(null)
+  const restoreGenRef = useRef(0)
+
+  const storageKey = currentAccount?.id ? chatSessionKey(currentAccount.id) : ''
 
   useEffect(() => {
-    if (!currentAccount) return
+    if (!currentAccount?.id || !storageKey) return
 
-    setMessages([])
-    setSessionId('')
-    setIsLoading(false)
-    connectWebSocket()
+    const saved =
+      readLocal(storageKey) ||
+      (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(storageKey) || '' : '')
 
-    return () => {
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
-      if (wsRef.current) {
-        wsRef.current.onclose = null
-        wsRef.current.close()
-      }
-    }
-  }, [currentAccount?.id])
+    const gen = ++restoreGenRef.current
+    let cancelled = false
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
-
-  const connectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.onclose = null
-      wsRef.current.close()
-    }
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const params = new URLSearchParams()
-    if (currentAccount?.id) {
-      params.set('account_id', String(currentAccount.id))
-    }
-    const token = getAuthToken()
-    if (token) {
-      params.set('token', token)
-    }
-    const qs = params.toString()
-    const wsUrl = `${protocol}//${window.location.host}/ws${qs ? `?${qs}` : ''}`
-
-    const websocket = new WebSocket(wsUrl)
-    wsRef.current = websocket
-
-    websocket.onopen = () => {
-      setWs(websocket)
-      setConnected(true)
-    }
-
-    websocket.onmessage = (event) => {
+    ;(async () => {
+      // Lightweight connectivity probe via models list (no WS dependency for chat persistence).
       try {
-        const data = JSON.parse(event.data)
+        const probe = await apiFetch('/v1/models', {}, currentAccount.id)
+        if (!cancelled) setConnected(probe.ok)
+      } catch {
+        if (!cancelled) setConnected(false)
+      }
 
-        if (data.type === 'connected') {
-          setSessionId(data.session_id)
-          return
-        }
+      if (!saved) {
+        setMessages([])
+        setSessionId('')
+        setRunId('')
+        setIsLoading(false)
+        return
+      }
 
-        if (data.role === 'assistant') {
-          setMessages(prev => [...prev, {
-            id: Date.now().toString(),
-            role: 'assistant',
-            content: data.content,
-            timestamp: new Date(),
-          }])
+      try {
+        const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, currentAccount.id)
+        if (!res.ok || cancelled || gen !== restoreGenRef.current) return
+        const data = (await res.json()) as SessionRestorePayload
+        if (cancelled || gen !== restoreGenRef.current) return
+
+        setSessionId(saved)
+        writeLocal(storageKey, saved)
+
+        let restored: Message[] = (data.messages || []).map((m) => ({
+          id: m.id,
+          role: m.role as Message['role'],
+          content: m.content || '',
+          timestamp: m.created_at ? new Date(m.created_at) : new Date(),
+          model: m.model,
+        }))
+
+        const active = data.active_run
+        if (active && (active.status === 'running' || active.status === 'queued')) {
+          const assistantId = `run-${active.id}`
+          if (!restored.some((m) => m.id === assistantId)) {
+            restored = [
+              ...restored,
+              {
+                id: assistantId,
+                role: 'assistant',
+                content: '',
+                timestamp: new Date(),
+                model: active.model,
+                toolSteps: data.active_run_tool_steps || [],
+              },
+            ]
+          } else {
+            restored = attachToolStepsToMessages(restored, data.active_run_tool_steps)
+          }
+          setMessages(restored)
+          setRunId(active.id)
+          setIsLoading(true)
+          await consumeRunEvents(active.id, 0, assistantId, active.model)
+        } else {
+          restored = attachToolStepsToMessages(restored, data.latest_run_tool_steps)
+          setMessages(restored)
+          setRunId('')
           setIsLoading(false)
         }
       } catch (e) {
-        console.error('Failed to parse message:', e)
+        if (!cancelled) console.error('restore chat session failed', e)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      runAbortRef.current?.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentAccount?.id, storageKey])
+
+  useEffect(() => {
+    if (sessionId && storageKey) {
+      writeLocal(storageKey, sessionId)
+      try {
+        sessionStorage.setItem(storageKey, sessionId)
+      } catch {
+        /* ignore */
       }
     }
+  }, [sessionId, storageKey])
 
-    websocket.onclose = () => {
-      setWs(null)
-      setConnected(false)
-      reconnectTimer.current = setTimeout(connectWebSocket, 3000)
-    }
-
-    websocket.onerror = () => {
-      setConnected(false)
-    }
-  }
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, isLoading])
 
   const appendVoiceText = useCallback((text: string) => {
     setInput((prev) => {
@@ -121,114 +150,186 @@ export default function ChatPage() {
     },
   })
 
+  type AgentStreamEvent = {
+    type?: string
+    content?: string
+    session_id?: string
+    model?: string
+    step?: { tool: string; args: string; result: string }
+    tool_steps?: { tool: string; args: string; result: string }[]
+  }
+
+  const consumeRunEvents = async (
+    targetRunId: string,
+    afterSeq: number,
+    assistantId: string,
+    fallbackModel?: string,
+  ) => {
+    runAbortRef.current?.abort()
+    const ac = new AbortController()
+    runAbortRef.current = ac
+    const response = await apiFetch(
+      `/v1/agent/runs/${targetRunId}/events?after_seq=${afterSeq}`,
+      { signal: ac.signal },
+      currentAccount?.id,
+    )
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || `HTTP ${response.status}`)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullText = ''
+    const steps: { tool: string; args: string; result: string }[] = []
+    const applyAssistant = (patch: Partial<Message>) => {
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)))
+    }
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const part of parts) {
+          const line = part.trim()
+          if (!line.startsWith('data:')) continue
+          const payload = line.replace(/^data:\s*/, '')
+          if (payload === '[DONE]') continue
+          let ev: AgentStreamEvent
+          try {
+            ev = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (ev.session_id) setSessionId(ev.session_id)
+          if (ev.type === 'delta' && ev.content) {
+            fullText += ev.content
+            applyAssistant({ content: fullText, model: ev.model || fallbackModel })
+          } else if (ev.type === 'tool_step' && ev.step) {
+            steps.push(ev.step)
+            applyAssistant({ toolSteps: [...steps] })
+          } else if (ev.type === 'done') {
+            if (ev.content) fullText = ev.content
+            if (ev.tool_steps?.length) {
+              steps.splice(0, steps.length, ...ev.tool_steps)
+            }
+            applyAssistant({
+              content: fullText,
+              model: ev.model || fallbackModel,
+              toolSteps: steps.length ? [...steps] : undefined,
+            })
+          } else if (ev.type === 'error') {
+            fullText = ev.content || 'error'
+            applyAssistant({ content: fullText })
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      throw err
+    } finally {
+      if (runAbortRef.current === ac) {
+        setIsLoading(false)
+        setRunId('')
+      }
+    }
+    if (!fullText) {
+      applyAssistant({ content: 'No response' })
+    }
+  }
+
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return
     if (voice.listening) {
       await voice.stop()
     }
 
+    const text = input
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: input,
+      content: text,
       timestamp: new Date(),
     }
 
-    setMessages(prev => [...prev, userMessage])
+    setMessages((prev) => [...prev, userMessage])
     setInput('')
     setIsLoading(true)
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        role: 'user',
-        content: input,
-      }))
-    } else {
-      try {
-        const response = await apiFetch('/v1/agent/chat', {
+    try {
+      const response = await apiFetch(
+        '/v1/agent/chat',
+        {
           method: 'POST',
           body: JSON.stringify({
-            message: input,
+            message: text,
             session_id: sessionId,
             stream: false,
           }),
-        }, currentAccount?.id)
-        const data = await response.json()
-        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+        },
+        currentAccount?.id,
+      )
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
 
-        if (data.session_id) {
-          setSessionId(data.session_id)
-        }
+      if (data.session_id) {
+        setSessionId(data.session_id)
+        if (storageKey) writeLocal(storageKey, data.session_id)
+      }
 
-        const assistantId = Date.now().toString()
-        setMessages(prev => [...prev, {
+      const assistantId = data.run_id ? `run-${data.run_id}` : Date.now().toString()
+      setMessages((prev) => [
+        ...prev,
+        {
           id: assistantId,
           role: 'assistant',
           content: '',
           timestamp: new Date(),
-        }])
+          toolSteps: [],
+        },
+      ])
 
-        if (data.run_id) {
-          const evRes = await apiFetch(
-            `/v1/agent/runs/${data.run_id}/events?after_seq=0`,
-            {},
-            currentAccount?.id,
-          )
-          if (!evRes.ok || !evRes.body) {
-            throw new Error('failed to subscribe run events')
-          }
-          const reader = evRes.body.getReader()
-          const decoder = new TextDecoder()
-          let buffer = ''
-          let fullText = ''
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            buffer += decoder.decode(value, { stream: true })
-            const parts = buffer.split('\n\n')
-            buffer = parts.pop() || ''
-            for (const part of parts) {
-              const line = part.trim()
-              if (!line.startsWith('data:')) continue
-              const payload = line.replace(/^data:\s*/, '')
-              if (payload === '[DONE]') continue
-              try {
-                const ev = JSON.parse(payload)
-                if (ev.session_id) setSessionId(ev.session_id)
-                if (ev.type === 'delta' && ev.content) {
-                  fullText += ev.content
-                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
-                } else if (ev.type === 'done' && ev.content) {
-                  fullText = ev.content
-                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
-                } else if (ev.type === 'error') {
-                  fullText = ev.content || 'error'
-                  setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: fullText } : m))
-                }
-              } catch { /* ignore */ }
-            }
-          }
-          if (!fullText) {
-            setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: 'No response' } : m))
-          }
-        } else {
-          setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: data.response || data.error || 'No response' } : m))
-        }
-      } catch (error) {
-        setMessages(prev => [...prev, {
+      if (data.run_id) {
+        setRunId(data.run_id)
+        await consumeRunEvents(data.run_id, 0, assistantId)
+      } else {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: data.response || data.error || 'No response' } : m,
+          ),
+        )
+        setIsLoading(false)
+      }
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
           id: Date.now().toString(),
           role: 'assistant',
           content: 'Error: Failed to send message. Is the backend running?',
           timestamp: new Date(),
-        }])
-      }
+        },
+      ])
       setIsLoading(false)
     }
   }
 
   const clearChat = () => {
+    runAbortRef.current?.abort()
     setMessages([])
     setSessionId('')
+    setRunId('')
+    setIsLoading(false)
+    if (storageKey) {
+      clearLocal(storageKey)
+      try {
+        sessionStorage.removeItem(storageKey)
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   return (
@@ -241,6 +342,8 @@ export default function ChatPage() {
               <span className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
                 Connected
+                {sessionId && <span className="ml-2">Session: {sessionId.substring(0, 8)}...</span>}
+                {runId && <span className="ml-2 text-amber-600">运行中</span>}
               </span>
             ) : (
               <span className="flex items-center gap-1.5">
@@ -248,15 +351,13 @@ export default function ChatPage() {
                 Disconnected
               </span>
             )}
-            {currentAccount && <span className="ml-2">@{currentAccount.username}</span>}
-            {sessionId && <span className="ml-2">Session: {sessionId.substring(0, 8)}...</span>}
           </p>
         </div>
         <button
           onClick={clearChat}
           className="h-8 px-3 text-[12px] text-muted-foreground hover:text-foreground border border-border rounded-md hover:bg-accent transition-colors"
         >
-          New Chat
+          Clear
         </button>
       </header>
 
@@ -266,19 +367,20 @@ export default function ChatPage() {
             <div className="text-center animate-fade-in">
               <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="16 18 22 12 16 6" />
-                  <polyline points="8 6 2 12 8 18" />
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
-              <h3 className="text-base font-semibold text-foreground mb-1.5">
-                Welcome to CodeGateway
-              </h3>
-              <p className="text-[13px] text-muted-foreground max-w-sm">
-                Start a conversation with your AI assistant. Channels and sessions are stored per account.
+              <h3 className="text-base font-semibold text-foreground mb-1.5">Start a conversation</h3>
+              <p className="text-[13px] text-muted-foreground mb-4 max-w-sm">
+                Ask anything. Switching pages will keep this session and reopen any in-progress reply.
               </p>
-              <div className="mt-4 text-[12px] text-muted-foreground/60">
-                <p>1. Go to Channels page and add your API provider</p>
-                <p>2. Come back here and start chatting</p>
+              <div className="text-left bg-card border border-border rounded-xl p-4 max-w-sm mx-auto">
+                <p className="text-[12px] font-medium text-foreground mb-2">Tips:</p>
+                <ul className="text-[12px] text-muted-foreground space-y-1.5">
+                  <li>1. Go to Channels page and add your API provider</li>
+                  <li>2. Set a channel as default</li>
+                  <li>3. Come back and start chatting</li>
+                </ul>
               </div>
             </div>
           </div>
@@ -289,70 +391,83 @@ export default function ChatPage() {
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
             >
               <div
-                className={`max-w-[70%] rounded-xl px-4 py-2.5 ${
+                className={`max-w-[80%] rounded-xl px-4 py-2.5 ${
                   msg.role === 'user'
                     ? 'bg-primary text-primary-foreground'
-                    : 'bg-card border border-border'
+                    : msg.role === 'system'
+                      ? 'bg-amber-500/10 border border-amber-500/30'
+                      : 'bg-card border border-border'
                 }`}
               >
-                <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                <p className={`text-[10px] mt-1.5 ${msg.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>
-                  {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                <p className="text-[13px] whitespace-pre-wrap">{msg.content}</p>
+                {msg.toolSteps && msg.toolSteps.length > 0 && (
+                  <div className="mt-2 space-y-1 border-t border-border/60 pt-2">
+                    {msg.toolSteps.map((step, idx) => (
+                      <details key={`${msg.id}-tool-${idx}`} className="text-[11px] text-muted-foreground">
+                        <summary className="cursor-pointer hover:text-foreground">
+                          {step.tool}
+                        </summary>
+                        <pre className="mt-1 whitespace-pre-wrap break-all opacity-80">
+                          {step.args}
+                          {'\n---\n'}
+                          {step.result}
+                        </pre>
+                      </details>
+                    ))}
+                  </div>
+                )}
+                <p className={`text-[11px] mt-1.5 ${msg.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>
+                  {msg.timestamp.toLocaleTimeString()}
                 </p>
               </div>
             </div>
           ))
         )}
-
         {isLoading && (
           <div className="flex justify-start animate-fade-in">
             <div className="bg-card border border-border rounded-xl px-4 py-3">
               <div className="flex items-center gap-1.5">
-                <div className="w-2 h-2 rounded-full bg-muted-foreground animate-bounce"></div>
-                <div className="w-2 h-2 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                <div className="w-2 h-2 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse"></div>
+                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>
               </div>
             </div>
           </div>
         )}
-
         <div ref={messagesEndRef} />
       </div>
 
       <div className="p-4 border-t border-border">
-        {(voice.interim || voice.error) && (
-          <div className="mb-2 text-[11px]">
-            {voice.listening && voice.interim && (
-              <span className="text-muted-foreground">识别中：{voice.interim}</span>
-            )}
-            {voice.error && <span className="text-red-500">{voice.error}</span>}
-          </div>
-        )}
-        <div className="flex gap-2">
-          <input
-            type="text"
+        <div className="flex gap-2 max-w-3xl mx-auto">
+          <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-            placeholder={connected ? '输入消息，或点麦克风口述…' : 'Connecting...'}
-            className="flex-1 h-10 px-4 bg-card border border-border rounded-lg text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition-colors"
-            disabled={isLoading || !connected}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void sendMessage()
+              }
+            }}
+            placeholder="Type a message..."
+            rows={1}
+            className="flex-1 px-4 py-2.5 bg-card border border-border rounded-xl text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-none"
           />
           <VoiceInputButton
             listening={voice.listening}
             supported={voice.supported}
-            disabled={isLoading || !connected}
+            disabled={isLoading}
+            title={
+              voice.engine === 'server'
+                ? '语音输入（服务端 ASR）'
+                : '语音输入（浏览器 Web Speech）'
+            }
             onClick={() => void voice.toggle()}
           />
           <button
-            onClick={sendMessage}
-            disabled={isLoading || !input.trim() || !connected}
-            className="h-10 px-4 bg-primary text-primary-foreground rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            onClick={() => void sendMessage()}
+            disabled={!input.trim() || isLoading}
+            className="h-10 px-4 bg-primary text-primary-foreground rounded-xl text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13" />
-              <polygon points="22 2 15 22 11 13 2 9 22 2" />
-            </svg>
             Send
           </button>
         </div>
