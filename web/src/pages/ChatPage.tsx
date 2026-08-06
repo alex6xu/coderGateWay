@@ -209,7 +209,7 @@ export default function ChatPage() {
             applyAssistant({ content: fullText, model: ev.model || fallbackModel })
           } else if (ev.type === 'tool_step' && ev.step) {
             steps.push(ev.step)
-            applyAssistant({ toolSteps: [...steps] })
+            applyAssistant({ toolSteps: [...steps], content: fullText || undefined })
           } else if (ev.type === 'done') {
             if (ev.content) fullText = ev.content
             if (ev.tool_steps?.length) {
@@ -221,8 +221,10 @@ export default function ChatPage() {
               toolSteps: steps.length ? [...steps] : undefined,
             })
           } else if (ev.type === 'error') {
-            fullText = ev.content || 'error'
-            applyAssistant({ content: fullText })
+            const errText = ev.content || 'error'
+            if (fullText) fullText = `${fullText}\n\n⚠️ ${errText}`
+            else fullText = errText
+            applyAssistant({ content: fullText, toolSteps: steps.length ? [...steps] : undefined })
           }
         }
       }
@@ -235,7 +237,7 @@ export default function ChatPage() {
         setRunId('')
       }
     }
-    if (!fullText) {
+    if (!fullText && steps.length === 0) {
       applyAssistant({ content: 'No response' })
     }
   }
@@ -401,20 +403,30 @@ export default function ChatPage() {
               >
                 <p className="text-[13px] whitespace-pre-wrap">{msg.content}</p>
                 {msg.toolSteps && msg.toolSteps.length > 0 && (
-                  <div className="mt-2 space-y-1 border-t border-border/60 pt-2">
-                    {msg.toolSteps.map((step, idx) => (
-                      <details key={`${msg.id}-tool-${idx}`} className="text-[11px] text-muted-foreground">
-                        <summary className="cursor-pointer hover:text-foreground">
-                          {step.tool}
-                        </summary>
-                        <pre className="mt-1 whitespace-pre-wrap break-all opacity-80">
-                          {step.args}
-                          {'\n---\n'}
-                          {step.result}
-                        </pre>
-                      </details>
-                    ))}
-                  </div>
+                  <details open className="mt-3 text-[12px] text-muted-foreground border-t border-border/60 pt-2">
+                    <summary className="cursor-pointer text-foreground/80 font-medium">
+                      执行过程 · {msg.toolSteps.length} 步工具调用
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {msg.toolSteps.map((step, idx) => (
+                        <details key={`${msg.id}-tool-${idx}`} className="rounded-lg border border-border/70 bg-background/50 px-2.5 py-2">
+                          <summary className="cursor-pointer font-mono text-[11px] text-foreground break-all">
+                            {idx + 1}. {step.tool}
+                          </summary>
+                          {step.args && (
+                            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] opacity-90">
+                              {step.args}
+                            </pre>
+                          )}
+                          {step.result && (
+                            <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 text-[11px] text-foreground/90">
+                              {step.result}
+                            </pre>
+                          )}
+                        </details>
+                      ))}
+                    </div>
+                  </details>
                 )}
                 <p className={`text-[11px] mt-1.5 ${msg.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>
                   {msg.timestamp.toLocaleTimeString()}
