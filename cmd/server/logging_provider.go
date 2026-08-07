@@ -57,8 +57,8 @@ func (p *loggingProvider) ChatCompletion(ctx context.Context, req *provider.Chat
 	if err != nil {
 		saveGatewayRequestLog(p.database, &gatewaylog.Entry{
 			UserID:      p.userID,
-			ChannelID:   p.channelID,
-			ChannelName: p.channelName,
+			ProviderID:   p.channelID,
+			ProviderName: p.channelName,
 			Model:       modelName,
 			Stream:      false,
 			StatusCode:  http.StatusInternalServerError,
@@ -78,8 +78,8 @@ func (p *loggingProvider) ChatCompletion(ctx context.Context, req *provider.Chat
 	respJSON, _ := json.Marshal(resp)
 	entry := &gatewaylog.Entry{
 		UserID:       p.userID,
-		ChannelID:    p.channelID,
-		ChannelName:  p.channelName,
+		ProviderID:    p.channelID,
+		ProviderName:  p.channelName,
 		Model:        modelName,
 		Stream:       false,
 		StatusCode:   http.StatusOK,
@@ -108,8 +108,8 @@ func (p *loggingProvider) ChatCompletionStream(ctx context.Context, req *provide
 	if err != nil {
 		saveGatewayRequestLog(p.database, &gatewaylog.Entry{
 			UserID:      p.userID,
-			ChannelID:   p.channelID,
-			ChannelName: p.channelName,
+			ProviderID:   p.channelID,
+			ProviderName: p.channelName,
 			Model:       modelName,
 			Stream:      true,
 			StatusCode:  http.StatusInternalServerError,
@@ -131,8 +131,8 @@ func (p *loggingProvider) ChatCompletionStream(ctx context.Context, req *provide
 			case <-ctx.Done():
 				saveGatewayRequestLog(p.database, &gatewaylog.Entry{
 					UserID:      p.userID,
-					ChannelID:   p.channelID,
-					ChannelName: p.channelName,
+					ProviderID:   p.channelID,
+					ProviderName: p.channelName,
 					Model:       modelName,
 					Stream:      true,
 					StatusCode:  http.StatusRequestTimeout,
@@ -150,8 +150,8 @@ func (p *loggingProvider) ChatCompletionStream(ctx context.Context, req *provide
 		respJSON, _ := json.Marshal(resp)
 		saveGatewayRequestLog(p.database, &gatewaylog.Entry{
 			UserID:           p.userID,
-			ChannelID:        p.channelID,
-			ChannelName:      p.channelName,
+			ProviderID:        p.channelID,
+			ProviderName:      p.channelName,
 			Model:            modelName,
 			Stream:           true,
 			StatusCode:       http.StatusOK,

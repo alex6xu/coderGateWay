@@ -29,7 +29,7 @@ type Token struct {
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
-type Channel struct {
+type Provider struct {
 	ID           int64     `json:"id"`
 	UserID       *int64    `json:"user_id"`
 	Name         string    `json:"name"`
@@ -49,6 +49,9 @@ type Channel struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+// Channel is a deprecated alias for Provider (DB/API renamed to providers).
+type Channel = Provider
 
 type Session struct {
 	ID                string    `json:"id"`
@@ -113,7 +116,7 @@ type UsageLog struct {
 	ID               int64     `json:"id"`
 	UserID           *int64    `json:"user_id"`
 	TokenID          *int64    `json:"token_id"`
-	ChannelID        *int64    `json:"channel_id"`
+	ProviderID       *int64    `json:"provider_id"`
 	Model            string    `json:"model"`
 	PromptTokens     int       `json:"prompt_tokens"`
 	CompletionTokens int       `json:"completion_tokens"`
@@ -123,17 +126,30 @@ type UsageLog struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
-// Channel types
+// Provider types (stored on providers.type)
 const (
-	ChannelTypeOpenAI   = 1
-	ChannelTypeClaude   = 2
-	ChannelTypeGemini   = 3
-	ChannelTypeDeepSeek = 4
-	ChannelTypeOllama   = 5
-	ChannelTypeMiMo     = 6
-	ChannelTypeAgnes    = 9
-	ChannelTypeGLM      = 10
-	ChannelTypeCustom   = 99
+	ProviderTypeOpenAI   = 1
+	ProviderTypeClaude   = 2
+	ProviderTypeGemini   = 3
+	ProviderTypeDeepSeek = 4
+	ProviderTypeOllama   = 5
+	ProviderTypeMiMo     = 6
+	ProviderTypeAgnes    = 9
+	ProviderTypeGLM      = 10
+	ProviderTypeCustom   = 99
+)
+
+// Deprecated aliases — prefer ProviderType*.
+const (
+	ChannelTypeOpenAI   = ProviderTypeOpenAI
+	ChannelTypeClaude   = ProviderTypeClaude
+	ChannelTypeGemini   = ProviderTypeGemini
+	ChannelTypeDeepSeek = ProviderTypeDeepSeek
+	ChannelTypeOllama   = ProviderTypeOllama
+	ChannelTypeMiMo     = ProviderTypeMiMo
+	ChannelTypeAgnes    = ProviderTypeAgnes
+	ChannelTypeGLM      = ProviderTypeGLM
+	ChannelTypeCustom   = ProviderTypeCustom
 )
 
 // Token status

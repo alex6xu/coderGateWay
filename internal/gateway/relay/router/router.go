@@ -279,7 +279,7 @@ func (r *SmartRouter) GetChannelStats() []ChannelStats {
 	stats := make([]ChannelStats, 0, len(r.channels))
 	for _, cs := range r.channels {
 		stats = append(stats, ChannelStats{
-			ChannelID:      int(cs.Channel.ID),
+			ProviderID:      int(cs.Channel.ID),
 			Name:           cs.Channel.Name,
 			Healthy:        cs.Healthy,
 			Latency:        cs.Latency,
@@ -293,7 +293,7 @@ func (r *SmartRouter) GetChannelStats() []ChannelStats {
 
 // ChannelStats represents channel statistics
 type ChannelStats struct {
-	ChannelID      int           `json:"channel_id"`
+	ProviderID      int           `json:"provider_id"`
 	Name           string        `json:"name"`
 	Healthy        bool          `json:"healthy"`
 	Latency        time.Duration `json:"latency"`

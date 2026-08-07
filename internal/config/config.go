@@ -113,10 +113,10 @@ type GatewayConfig struct {
 	Enabled         bool              `yaml:"enabled"`
 	Routing         RoutingConfig     `yaml:"routing"`
 	FreeProxies     []ProxyConfig     `yaml:"free_proxies"`
-	DefaultChannels []DefaultChannel  `yaml:"default_channels"`
+	DefaultProviders []DefaultProvider `yaml:"default_providers"`
 }
 
-type DefaultChannel struct {
+type DefaultProvider struct {
 	Name     string `yaml:"name"`
 	Type     int    `yaml:"type"`
 	BaseURL  string `yaml:"base_url"`
@@ -125,6 +125,9 @@ type DefaultChannel struct {
 	Weight   int    `yaml:"weight"`
 	Priority int    `yaml:"priority"`
 }
+
+// DefaultChannel is a deprecated alias for DefaultProvider.
+type DefaultChannel = DefaultProvider
 
 type RoutingConfig struct {
 	Strategy        string `yaml:"strategy"`

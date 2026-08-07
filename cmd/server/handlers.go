@@ -31,7 +31,7 @@ import (
 
 // ========== Channel Handlers ==========
 
-func handleListChannels(database *db.DB) gin.HandlerFunc {
+func handleListProviders(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -40,10 +40,10 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 
 		rows, err := database.Query(`
 			SELECT id, user_id, name, type, key, base_url, models, weight, priority, status, balance, used_quota, model_mapping, groups, is_default, COALESCE(auth_mode, 'api_key'), created_at, updated_at
-			FROM channels WHERE user_id = ? ORDER BY id DESC
+			FROM providers WHERE user_id = ? ORDER BY id DESC
 		`, accountID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query channels"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query providers"})
 			return
 		}
 		defer rows.Close()
@@ -60,11 +60,11 @@ func handleListChannels(database *db.DB) gin.HandlerFunc {
 			channels = append(channels, ch)
 		}
 
-		c.JSON(http.StatusOK, gin.H{"channels": channels})
+		c.JSON(http.StatusOK, gin.H{"providers": channels})
 	}
 }
 
-func handleCreateChannel(database *db.DB) gin.HandlerFunc {
+func handleCreateProvider(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -100,7 +100,7 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 			return
 		}
 
-		authMode := normalizeChannelAuthMode(req.AuthMode, req.Type)
+		authMode := normalizeProviderAuthMode(req.AuthMode, req.Type)
 		if authMode == "oauth" && req.Type != model.ChannelTypeClaude {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_mode=oauth is only supported for Claude channels"})
 			return
@@ -120,12 +120,12 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 
 		now := time.Now()
 		result, err := database.Exec(`
-			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, model_mapping, groups, auth_mode, created_at, updated_at)
+			INSERT INTO providers (user_id, name, type, key, base_url, models, weight, priority, status, model_mapping, groups, auth_mode, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
 		`, accountID, req.Name, req.Type, req.Key, req.BaseURL, req.Models, req.Weight, req.Priority, req.ModelMapping, req.Groups, authMode, now, now)
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create channel"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create provider"})
 			return
 		}
 
@@ -138,7 +138,7 @@ func handleCreateChannel(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
+func handleUpdateProvider(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -153,7 +153,7 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 		}
 
 		if !channelOwnedBy(database, channelID, accountID) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider not found"})
 			return
 		}
 
@@ -183,7 +183,7 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 		}
 
 		// Build update query dynamically
-		query := "UPDATE channels SET updated_at = ?"
+		query := "UPDATE providers SET updated_at = ?"
 		args := []interface{}{time.Now()}
 
 		if req.Name != nil {
@@ -200,13 +200,13 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 			args = append(args, *req.Type)
 		}
 		if req.AuthMode != nil {
-			mode := normalizeChannelAuthMode(*req.AuthMode, 0)
+			mode := normalizeProviderAuthMode(*req.AuthMode, 0)
 			if mode == "oauth" {
 				chType := 0
 				if req.Type != nil {
 					chType = *req.Type
 				} else {
-					_ = database.QueryRow(`SELECT type FROM channels WHERE id = ? AND user_id = ?`, channelID, accountID).Scan(&chType)
+					_ = database.QueryRow(`SELECT type FROM providers WHERE id = ? AND user_id = ?`, channelID, accountID).Scan(&chType)
 				}
 				if chType != model.ChannelTypeClaude {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "auth_mode=oauth is only supported for Claude channels"})
@@ -258,7 +258,7 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 
 		_, err = database.Exec(query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update channel"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update provider"})
 			return
 		}
 
@@ -266,7 +266,7 @@ func handleUpdateChannel(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
+func handleDeleteProvider(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -280,14 +280,14 @@ func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 			return
 		}
 
-		result, err := database.Exec("DELETE FROM channels WHERE id = ? AND user_id = ?", channelID, accountID)
+		result, err := database.Exec("DELETE FROM providers WHERE id = ? AND user_id = ?", channelID, accountID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete channel"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete provider"})
 			return
 		}
 		affected, _ := result.RowsAffected()
 		if affected == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider not found"})
 			return
 		}
 
@@ -295,7 +295,7 @@ func handleDeleteChannel(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-func handleSetDefaultChannel(database *db.DB) gin.HandlerFunc {
+func handleSetDefaultProvider(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -310,18 +310,18 @@ func handleSetDefaultChannel(database *db.DB) gin.HandlerFunc {
 		}
 
 		if !channelOwnedBy(database, channelID, accountID) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider not found"})
 			return
 		}
 
 		// Clear all defaults for this account
-		if _, err := database.Exec("UPDATE channels SET is_default = 0 WHERE user_id = ?", accountID); err != nil {
+		if _, err := database.Exec("UPDATE providers SET is_default = 0 WHERE user_id = ?", accountID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear defaults"})
 			return
 		}
 
 		// Set this channel as default
-		if _, err := database.Exec("UPDATE channels SET is_default = 1 WHERE id = ? AND user_id = ?", channelID, accountID); err != nil {
+		if _, err := database.Exec("UPDATE providers SET is_default = 1 WHERE id = ? AND user_id = ?", channelID, accountID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to set default"})
 			return
 		}
@@ -330,7 +330,7 @@ func handleSetDefaultChannel(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
+func handleFetchProviderModels(database *db.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -345,7 +345,7 @@ func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
 		}
 
 		if !channelOwnedBy(database, channelID, accountID) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider not found"})
 			return
 		}
 
@@ -354,13 +354,13 @@ func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
 		err = database.QueryRow(`
 			SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status,
 			       COALESCE(auth_mode, 'api_key')
-			FROM channels WHERE id = ? AND user_id = ?
+			FROM providers WHERE id = ? AND user_id = ?
 		`, channelID, accountID).Scan(
 			&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status,
 			&ch.AuthMode,
 		)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "provider not found"})
 			return
 		}
 		ch.UserID = &userID
@@ -374,8 +374,8 @@ func handleFetchChannelModels(database *db.DB) gin.HandlerFunc {
 	}
 }
 
-// handleProbeChannelModels fetches upstream models using form credentials (for add-provider flow).
-func handleProbeChannelModels() gin.HandlerFunc {
+// handleProbeProviderModels fetches upstream models using form credentials (for add-provider flow).
+func handleProbeProviderModels() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID, ok := requireAccountID(c)
 		if !ok {
@@ -445,11 +445,11 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 				Model:       req.Model,
 				Stream:      req.Stream,
 				StatusCode:  http.StatusServiceUnavailable,
-				Error:       "no available channel for model: " + req.Model,
+				Error:       "no available provider for model: " + req.Model,
 				RequestBody: requestJSON,
 				LatencyMs:   time.Since(started).Milliseconds(),
 			})
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel for model: " + req.Model})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available provider for model: " + req.Model})
 			return
 		}
 
@@ -458,12 +458,12 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			selected := firstStreamCandidate(candidates)
 			req.Model = selected.model
 			log.Printf("[chat] account=%d model=%s channel=%s(type=%d) stream=true", accountID, req.Model, selected.channel.Name, selected.channel.Type)
-			prov, err := createProviderFromChannel(selected.channel)
+			prov, err := createLLMProvider(selected.channel)
 			if err != nil {
 				saveGatewayRequestLog(database, &gatewaylog.Entry{
 					UserID:      accountID,
-					ChannelID:   selected.channel.ID,
-					ChannelName: selected.channel.Name,
+					ProviderID:   selected.channel.ID,
+					ProviderName: selected.channel.Name,
 					Model:       selected.model,
 					Stream:      true,
 					StatusCode:  http.StatusInternalServerError,
@@ -478,7 +478,7 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			return
 		}
 
-		resp, selected, err := completeWithCandidates(c.Request.Context(), candidates, &req, createProviderFromChannel)
+		resp, selected, err := completeWithCandidates(c.Request.Context(), candidates, &req, createLLMProvider)
 		latency := time.Since(started).Milliseconds()
 		if err != nil {
 			chID, chName, modelName := int64(0), "", req.Model
@@ -491,8 +491,8 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 			}
 			saveGatewayRequestLog(database, &gatewaylog.Entry{
 				UserID:      accountID,
-				ChannelID:   chID,
-				ChannelName: chName,
+				ProviderID:   chID,
+				ProviderName: chName,
 				Model:       modelName,
 				Stream:      false,
 				StatusCode:  http.StatusInternalServerError,
@@ -508,8 +508,8 @@ func handleChatCompletions(database *db.DB, cfg *config.Config) gin.HandlerFunc 
 		respJSON, _ := json.Marshal(resp)
 		saveGatewayRequestLog(database, &gatewaylog.Entry{
 			UserID:           accountID,
-			ChannelID:        selected.channel.ID,
-			ChannelName:      selected.channel.Name,
+			ProviderID:        selected.channel.ID,
+			ProviderName:      selected.channel.Name,
 			Model:            selected.model,
 			Stream:           false,
 			StatusCode:       http.StatusOK,
@@ -568,12 +568,12 @@ func resolveChatCompletionCandidates(database *db.DB, accountID int64, requested
 func resolveModelCandidates(database *db.DB, accountID int64, requestedName string, requestedModels []string) ([]chatCompletionCandidate, error) {
 	candidates := make([]chatCompletionCandidate, 0, len(requestedModels))
 	for _, requested := range requestedModels {
-		channel, err := findChannelForModel(database, accountID, requested)
+		channel, err := findProviderForModel(database, accountID, requested)
 		if err != nil {
 			continue
 		}
 		candidates = append(candidates, chatCompletionCandidate{
-			model:   resolveModelForChannel(channel, requested),
+			model:   resolveModelForProvider(channel, requested),
 			channel: channel,
 		})
 	}
@@ -699,8 +699,8 @@ func handleStreamResponse(
 	if !ok {
 		saveGatewayRequestLog(database, &gatewaylog.Entry{
 			UserID:      accountID,
-			ChannelID:   selected.channel.ID,
-			ChannelName: selected.channel.Name,
+			ProviderID:   selected.channel.ID,
+			ProviderName: selected.channel.Name,
 			Model:       selected.model,
 			Stream:      true,
 			StatusCode:  http.StatusInternalServerError,
@@ -716,8 +716,8 @@ func handleStreamResponse(
 	if err != nil {
 		saveGatewayRequestLog(database, &gatewaylog.Entry{
 			UserID:      accountID,
-			ChannelID:   selected.channel.ID,
-			ChannelName: selected.channel.Name,
+			ProviderID:   selected.channel.ID,
+			ProviderName: selected.channel.Name,
 			Model:       selected.model,
 			Stream:      true,
 			StatusCode:  http.StatusInternalServerError,
@@ -747,8 +747,8 @@ func handleStreamResponse(
 	respJSON, _ := json.Marshal(resp)
 	saveGatewayRequestLog(database, &gatewaylog.Entry{
 		UserID:           accountID,
-		ChannelID:        selected.channel.ID,
-		ChannelName:      selected.channel.Name,
+		ProviderID:        selected.channel.ID,
+		ProviderName:      selected.channel.Name,
 		Model:            selected.model,
 		Stream:           true,
 		StatusCode:       http.StatusOK,
@@ -1377,9 +1377,9 @@ func handleGetStats(database *db.DB) gin.HandlerFunc {
 		stats["totalMessages"] = totalMessages
 
 		// Active channels for account
-		var activeChannels int
-		database.QueryRow("SELECT COUNT(*) FROM channels WHERE status = 1 AND user_id = ?", accountID).Scan(&activeChannels)
-		stats["activeChannels"] = activeChannels
+		var activeProviders int
+		database.QueryRow("SELECT COUNT(*) FROM providers WHERE status = 1 AND user_id = ?", accountID).Scan(&activeProviders)
+		stats["activeProviders"] = activeProviders
 
 		// Total tokens and cost from usage_logs for account
 		var totalTokens int64
@@ -1399,7 +1399,7 @@ func handleGetStats(database *db.DB) gin.HandlerFunc {
 
 func channelOwnedBy(database *db.DB, channelID, accountID int64) bool {
 	var count int
-	database.QueryRow("SELECT COUNT(*) FROM channels WHERE id = ? AND user_id = ?", channelID, accountID).Scan(&count)
+	database.QueryRow("SELECT COUNT(*) FROM providers WHERE id = ? AND user_id = ?", channelID, accountID).Scan(&count)
 	return count > 0
 }
 
@@ -1409,15 +1409,15 @@ func sessionOwnedBy(database *db.DB, sessionID string, accountID int64) bool {
 	return count > 0
 }
 
-func findChannelForModel(database *db.DB, accountID int64, modelName string) (*model.Channel, error) {
+func findProviderForModel(database *db.DB, accountID int64, modelName string) (*model.Channel, error) {
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
-		return findAnyChannel(database, accountID)
+		return findAnyProvider(database, accountID)
 	}
 
 	rows, err := database.Query(`
 		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status, COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
-		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC
+		FROM providers WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
@@ -1486,7 +1486,7 @@ func channelUsableForAPI(ch *model.Channel) bool {
 	return true
 }
 
-func createProviderFromChannel(channel *model.Channel) (provider.Provider, error) {
+func createLLMProvider(channel *model.Channel) (provider.Provider, error) {
 	providerCfg := &provider.ProviderConfig{
 		Name:     channel.Name,
 		Type:     getProviderType(channel.Type),
@@ -1524,7 +1524,7 @@ func createProviderFromChannel(channel *model.Channel) (provider.Provider, error
 	return provider.NewProvider(providerCfg)
 }
 
-func resolveModelForChannel(channel *model.Channel, modelName string) string {
+func resolveModelForProvider(channel *model.Channel, modelName string) string {
 	if modelName == "" {
 		if models := parseModelsJSON(channel.Models); len(models) > 0 {
 			return models[0]
@@ -1553,11 +1553,11 @@ func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode str
 	}
 }
 
-func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
+func findAnyProvider(database *db.DB, accountID int64) (*model.Channel, error) {
 	rows, err := database.Query(`
 		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status,
 		       COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
-		FROM channels WHERE status = 1 AND user_id = ?
+		FROM providers WHERE status = 1 AND user_id = ?
 		ORDER BY is_default DESC, priority DESC, weight DESC
 	`, accountID)
 	if err != nil {
@@ -1580,7 +1580,7 @@ func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
 		}
 		return &ch, nil
 	}
-	return nil, fmt.Errorf("no available channel")
+	return nil, fmt.Errorf("no available provider")
 }
 
 func getProviderType(channelType int) provider.ProviderType {
@@ -1653,7 +1653,7 @@ func logUsage(database *db.DB, accountID int64, channel *model.Channel, model st
 		float64(completionTokens)*costPerOutputToken
 
 	database.Exec(`
-		INSERT INTO usage_logs (user_id, channel_id, model, prompt_tokens, completion_tokens, cost, latency, status, created_at)
+		INSERT INTO usage_logs (user_id, provider_id, model, prompt_tokens, completion_tokens, cost, latency, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
 	`, accountID, channel.ID, model, promptTokens, completionTokens, cost, time.Now())
 }
@@ -1861,19 +1861,19 @@ func processMessage(database *db.DB, cfg *config.Config, sessionID string, messa
 	var channel *model.Channel
 	var err error
 	if modelName != "" {
-		channel, err = findChannelForModel(database, accountID, modelName)
+		channel, err = findProviderForModel(database, accountID, modelName)
 	}
 	if channel == nil || err != nil {
-		channel, err = findAnyChannel(database, accountID)
+		channel, err = findAnyProvider(database, accountID)
 		if err != nil {
 			return "Error: No available channel. Please add a channel first."
 		}
 	}
 
-	modelName = resolveModelForChannel(channel, modelName)
+	modelName = resolveModelForProvider(channel, modelName)
 	log.Printf("[chat/ws] account=%d session=%s model=%s channel=%s(type=%d)", accountID, sessionID, modelName, channel.Name, channel.Type)
 
-	prov, err := createProviderFromChannel(channel)
+	prov, err := createLLMProvider(channel)
 	if err != nil {
 		return "Error: " + err.Error()
 	}

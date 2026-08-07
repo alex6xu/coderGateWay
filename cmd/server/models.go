@@ -116,7 +116,7 @@ func openaiAPIError(message, errType, param, code string) gin.H {
 func collectAvailableModels(ctx context.Context, database *db.DB, accountID int64) ([]openaiModel, error) {
 	rows, err := database.Query(`
 		SELECT id, name, type, key, base_url, models, created_at
-		FROM channels
+		FROM providers
 		WHERE status = 1 AND user_id = ?
 		ORDER BY priority DESC, weight DESC, id ASC
 	`, accountID)
@@ -193,12 +193,12 @@ func listUpstreamModels(ctx context.Context, ch *model.Channel) ([]string, error
 	if !supportsUpstreamModelList(ch.Type) {
 		return nil, fmt.Errorf("channel type does not support upstream model list")
 	}
-	// OAuth channels may have an empty key; createProviderFromChannel fills the token.
+	// OAuth channels may have an empty key; createLLMProvider fills the token.
 	if strings.TrimSpace(ch.Key) == "" && !strings.EqualFold(ch.AuthMode, "oauth") {
 		return nil, fmt.Errorf("api key is required to fetch models")
 	}
 
-	prov, err := createProviderFromChannel(ch)
+	prov, err := createLLMProvider(ch)
 	if err != nil {
 		return nil, err
 	}

@@ -225,8 +225,8 @@ func (m *Manager) Delete(id int64) error {
 		return fmt.Errorf("failed to delete sessions: %w", err)
 	}
 
-	if _, err := tx.Exec("DELETE FROM channels WHERE user_id = ?", id); err != nil {
-		return fmt.Errorf("failed to delete channels: %w", err)
+	if _, err := tx.Exec("DELETE FROM providers WHERE user_id = ?", id); err != nil {
+		return fmt.Errorf("failed to delete providers: %w", err)
 	}
 
 	if _, err := tx.Exec("DELETE FROM auth_sessions WHERE user_id = ?", id); err != nil {

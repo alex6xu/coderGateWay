@@ -37,7 +37,8 @@ function ProtectedApp() {
           <Route path="code" element={<CoderPage />} />
           <Route path="coder" element={<CoderPage />} />
           <Route path="dashboard" element={<DashboardPage />} />
-          <Route path="channels" element={<ChannelsPage />} />
+          <Route path="providers" element={<ChannelsPage />} />
+          <Route path="channels" element={<Navigate to="/providers" replace />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="tags" element={<TagsPage />} />
           <Route path="agent-tasks" element={<AgentTasksPage />} />

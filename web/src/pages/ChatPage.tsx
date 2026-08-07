@@ -260,8 +260,8 @@ export default function ChatPage() {
               <div className="text-left bg-card border border-border rounded-xl p-4 max-w-sm mx-auto">
                 <p className="text-[12px] font-medium text-foreground mb-2">Tips:</p>
                 <ul className="text-[12px] text-muted-foreground space-y-1.5">
-                  <li>1. Go to Channels page and add your API provider</li>
-                  <li>2. Set a channel as default</li>
+                  <li>1. Go to Providers page and add your API provider</li>
+                  <li>2. Set a provider as default</li>
                   <li>3. Come back and start chatting</li>
                 </ul>
               </div>

@@ -151,7 +151,7 @@ func handleClaudeOAuthDisconnect(svc *claudeoauth.Service) gin.HandlerFunc {
 	}
 }
 
-func normalizeChannelAuthMode(mode string, channelType int) string {
+func normalizeProviderAuthMode(mode string, channelType int) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "oauth" {
 		return "oauth"

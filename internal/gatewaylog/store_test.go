@@ -21,8 +21,8 @@ func testDB(t *testing.T) *sql.DB {
 		CREATE TABLE gateway_request_logs (
 			id TEXT PRIMARY KEY,
 			user_id INTEGER NOT NULL,
-			channel_id INTEGER,
-			channel_name TEXT DEFAULT '',
+			provider_id INTEGER,
+			provider_name TEXT DEFAULT '',
 			model TEXT DEFAULT '',
 			stream INTEGER DEFAULT 0,
 			status_code INTEGER DEFAULT 0,
@@ -48,8 +48,8 @@ func TestInsertListGetIsolation(t *testing.T) {
 
 	e := &Entry{
 		UserID:       1,
-		ChannelID:    10,
-		ChannelName:  "claude",
+		ProviderID:    10,
+		ProviderName:  "claude",
 		Model:        "claude-sonnet-4",
 		Stream:       false,
 		StatusCode:   200,

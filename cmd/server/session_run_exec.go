@@ -72,22 +72,22 @@ func (rt *sessionRunRuntime) execute(ctx context.Context, run *sessionrun.Run) e
 	var err error
 	if modelName == "" {
 		// Chat UI often omits model; prefer the account default channel.
-		channel, err = findAnyChannel(rt.database, run.UserID)
+		channel, err = findAnyProvider(rt.database, run.UserID)
 	} else {
-		channel, err = findChannelForModel(rt.database, run.UserID, modelName)
+		channel, err = findProviderForModel(rt.database, run.UserID, modelName)
 		if channel == nil || err != nil {
-			channel, err = findAnyChannel(rt.database, run.UserID)
+			channel, err = findAnyProvider(rt.database, run.UserID)
 		}
 	}
 	if channel == nil || err != nil {
-		rt.emit(run, sessionrun.EventError, AgentEvent{Content: "no available channel"})
-		_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, "no available channel")
+		rt.emit(run, sessionrun.EventError, AgentEvent{Content: "no available provider"})
+		_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, "no available provider")
 		return err
 	}
-	modelName = resolveModelForChannel(channel, modelName)
+	modelName = resolveModelForProvider(channel, modelName)
 	run.Model = modelName
 
-	prov, err := createProviderFromChannel(channel)
+	prov, err := createLLMProvider(channel)
 	if err != nil {
 		rt.emit(run, sessionrun.EventError, AgentEvent{Content: err.Error()})
 		_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, err.Error())

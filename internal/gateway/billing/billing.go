@@ -97,7 +97,7 @@ func (s *BillingService) CreateUsageLog(userID, tokenID, channelID *int64, model
 	return &model.UsageLog{
 		UserID:           userID,
 		TokenID:          tokenID,
-		ChannelID:        channelID,
+		ProviderID:        channelID,
 		Model:            modelName,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,

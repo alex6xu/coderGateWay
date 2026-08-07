@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/alex/codegateway/internal/account"
@@ -20,7 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// claudeOAuthSvc is set in Run and used by createProviderFromChannel for subscription auth.
+// claudeOAuthSvc is set in Run and used by createLLMProvider for subscription auth.
 var claudeOAuthSvc *claudeoauth.Service
 
 func Run() error {
@@ -28,6 +29,15 @@ func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.Server.Mode)) {
+	case "release", "prod", "production":
+		gin.SetMode(gin.ReleaseMode)
+	case "test":
+		gin.SetMode(gin.TestMode)
+	default:
+		gin.SetMode(gin.DebugMode)
 	}
 
 	// Initialize database
@@ -72,7 +82,7 @@ func Run() error {
 	}
 
 	// Initialize default channels for the default account
-	initDefaultChannels(database, cfg, defaultAccount.ID)
+	initDefaultProviders(database, cfg, defaultAccount.ID)
 	taskWorker := newAgentTaskWorker(database, workspaceMgr, cfg)
 	if _, err := taskWorker.RecoverInterrupted(); err != nil {
 		return fmt.Errorf("failed to recover interrupted agent tasks: %w", err)
@@ -244,13 +254,13 @@ func setupRoutes(r *gin.Engine, database *db.DB, cfg *config.Config, hub *WSHub,
 			{
 				admin.GET("/stats", handleGetStats(database))
 
-				admin.GET("/channels", handleListChannels(database))
-				admin.POST("/channels", handleCreateChannel(database))
-				admin.POST("/channels/fetch-models", handleProbeChannelModels())
-				admin.PUT("/channels/:id", handleUpdateChannel(database))
-				admin.DELETE("/channels/:id", handleDeleteChannel(database))
-				admin.PUT("/channels/:id/set-default", handleSetDefaultChannel(database))
-				admin.POST("/channels/:id/fetch-models", handleFetchChannelModels(database))
+				admin.GET("/providers", handleListProviders(database))
+				admin.POST("/providers", handleCreateProvider(database))
+				admin.POST("/providers/fetch-models", handleProbeProviderModels())
+				admin.PUT("/providers/:id", handleUpdateProvider(database))
+				admin.DELETE("/providers/:id", handleDeleteProvider(database))
+				admin.PUT("/providers/:id/set-default", handleSetDefaultProvider(database))
+				admin.POST("/providers/:id/fetch-models", handleFetchProviderModels(database))
 
 				admin.GET("/accounts/current", handleGetCurrentAccount(accountMgr))
 
@@ -291,11 +301,11 @@ func trimID(id string) string {
 	return id[:6]
 }
 
-func initDefaultChannels(database *db.DB, cfg *config.Config, accountID int64) {
-	for _, ch := range cfg.Gateway.DefaultChannels {
+func initDefaultProviders(database *db.DB, cfg *config.Config, accountID int64) {
+	for _, ch := range cfg.Gateway.DefaultProviders {
 		var exists int
 		err := database.QueryRow(
-			"SELECT COUNT(*) FROM channels WHERE name = ? AND user_id = ?",
+			"SELECT COUNT(*) FROM providers WHERE name = ? AND user_id = ?",
 			ch.Name, accountID,
 		).Scan(&exists)
 		if err != nil {
@@ -307,7 +317,7 @@ func initDefaultChannels(database *db.DB, cfg *config.Config, accountID int64) {
 		}
 
 		_, err = database.Exec(`
-			INSERT INTO channels (user_id, name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
+			INSERT INTO providers (user_id, name, type, key, base_url, models, weight, priority, status, groups, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'default', datetime('now'), datetime('now'))
 		`, accountID, ch.Name, ch.Type, ch.Key, ch.BaseURL, ch.Models, ch.Weight, ch.Priority)
 		if err != nil {
@@ -319,7 +329,7 @@ func initDefaultChannels(database *db.DB, cfg *config.Config, accountID int64) {
 }
 
 func assignOrphanedData(database *db.DB, accountID int64) error {
-	if _, err := database.Exec("UPDATE channels SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {
+	if _, err := database.Exec("UPDATE providers SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {
 		return err
 	}
 	if _, err := database.Exec("UPDATE sessions SET user_id = ? WHERE user_id IS NULL", accountID); err != nil {

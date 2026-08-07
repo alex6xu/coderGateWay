@@ -167,7 +167,7 @@ func resolveAgentTaskProvider(database *db.DB, userID, profileID int64) (provide
 		return nil, "", err
 	}
 	candidate := firstStreamCandidate(candidates)
-	prov, err := createProviderFromChannel(candidate.channel)
+	prov, err := createLLMProvider(candidate.channel)
 	if err != nil {
 		return nil, "", fmt.Errorf("create provider: %w", err)
 	}

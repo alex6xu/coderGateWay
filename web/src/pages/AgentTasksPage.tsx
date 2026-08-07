@@ -174,7 +174,7 @@ export default function AgentTasksPage() {
       <div className="grid gap-6 xl:grid-cols-2">
         <section className="bg-card border border-border rounded-xl p-5">
           <h3 className="text-sm font-semibold text-foreground">Route Profiles</h3>
-          <p className="text-[12px] text-muted-foreground mt-1">Ordered model candidates only; provider credentials remain in Channels.</p>
+          <p className="text-[12px] text-muted-foreground mt-1">Ordered model candidates only; provider credentials remain in Providers.</p>
           <div className="grid gap-3 mt-4 sm:grid-cols-2">
             <input value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="Profile name" className="h-9 px-3 bg-background border border-border rounded-lg text-[13px]" />
             <select value={profilePurpose} onChange={(event) => setProfilePurpose(event.target.value as RouteProfile['purpose'])} className="h-9 px-3 bg-background border border-border rounded-lg text-[13px]">

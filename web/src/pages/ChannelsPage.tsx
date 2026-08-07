@@ -382,13 +382,13 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
 
   const fetchChannels = async () => {
     try {
-      const res = await apiFetch('/v1/admin/channels', {}, accountId)
+      const res = await apiFetch('/v1/admin/providers', {}, accountId)
       if (res.ok) {
         const data = await res.json()
-        setChannels(data.channels || [])
+        setChannels(data.providers || [])
       }
     } catch (e) {
-      console.error('Failed to fetch channels:', e)
+      console.error('Failed to fetch providers:', e)
     }
   }
 
@@ -547,15 +547,15 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
         targetId = duplicate.id
       }
 
-      const url = targetId ? `/v1/admin/channels/${targetId}` : '/v1/admin/channels'
+      const url = targetId ? `/v1/admin/providers/${targetId}` : '/v1/admin/providers'
       const method = targetId ? 'PUT' : 'POST'
       const res = await apiFetch(url, { method, body: JSON.stringify(payload) }, accountId)
       if (res.ok) {
         if (payload.is_default === 1 && targetId) {
-          await apiFetch(`/v1/admin/channels/${targetId}/set-default`, { method: 'PUT' }, accountId)
+          await apiFetch(`/v1/admin/providers/${targetId}/set-default`, { method: 'PUT' }, accountId)
         } else if (payload.is_default === 1 && !targetId) {
           const data = await res.json()
-          if (data.id) await apiFetch(`/v1/admin/channels/${data.id}/set-default`, { method: 'PUT' }, accountId)
+          if (data.id) await apiFetch(`/v1/admin/providers/${data.id}/set-default`, { method: 'PUT' }, accountId)
         }
         setShowModal(false)
         setEditingId(null)
@@ -572,7 +572,7 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
   const handleDelete = async (id: number) => {
     if (!confirm('确认删除该提供商通道？')) return
     try {
-      await apiFetch(`/v1/admin/channels/${id}`, { method: 'DELETE' }, accountId)
+      await apiFetch(`/v1/admin/providers/${id}`, { method: 'DELETE' }, accountId)
       fetchChannels()
     } catch (e) {
       console.error('Failed to delete channel:', e)
@@ -581,7 +581,7 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
 
   const handleSetDefault = async (id: number) => {
     try {
-      await apiFetch(`/v1/admin/channels/${id}/set-default`, { method: 'PUT' }, accountId)
+      await apiFetch(`/v1/admin/providers/${id}/set-default`, { method: 'PUT' }, accountId)
       fetchChannels()
     } catch (e) {
       console.error('Failed to set default channel:', e)
@@ -626,8 +626,8 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
     setFetchingModels(true)
     try {
       const res = editingId
-        ? await apiFetch(`/v1/admin/channels/${editingId}/fetch-models`, { method: 'POST' }, accountId)
-        : await apiFetch('/v1/admin/channels/fetch-models', {
+        ? await apiFetch(`/v1/admin/providers/${editingId}/fetch-models`, { method: 'POST' }, accountId)
+        : await apiFetch('/v1/admin/providers/fetch-models', {
             method: 'POST',
             body: JSON.stringify({
               type: form.type,
@@ -1071,8 +1071,8 @@ function ProviderSection({
 
 interface RequestLogSummary {
   id: string
-  channel_id?: number
-  channel_name?: string
+  provider_id?: number
+  provider_name?: string
   model: string
   stream: boolean
   status_code: number
@@ -1208,7 +1208,7 @@ function RequestLogsPage({ accountId }: { accountId?: number }) {
                   <tr className="border-b border-border text-left">
                     <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">时间</th>
                     <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">模型</th>
-                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">渠道</th>
+                    <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">提供商</th>
                     <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">状态</th>
                     <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">耗时</th>
                     <th className="px-3 py-2 text-[11px] font-medium text-muted-foreground">Tokens</th>
@@ -1230,7 +1230,7 @@ function RequestLogsPage({ accountId }: { accountId?: number }) {
                         {log.model || '-'}
                       </td>
                       <td className="px-3 py-2 text-[12px] text-muted-foreground max-w-[120px] truncate">
-                        {log.channel_name || '-'}
+                        {log.provider_name || '-'}
                       </td>
                       <td className="px-3 py-2 text-[12px]">
                         <span
@@ -1283,8 +1283,8 @@ function RequestLogsPage({ accountId }: { accountId?: number }) {
                     <p className="font-mono text-foreground break-all">{detail.model}</p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">渠道</span>
-                    <p className="text-foreground break-all">{detail.channel_name || '-'}</p>
+                    <span className="text-muted-foreground">提供商</span>
+                    <p className="text-foreground break-all">{detail.provider_name || '-'}</p>
                   </div>
                   <div>
                     <span className="text-muted-foreground">状态</span>

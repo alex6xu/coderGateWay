@@ -42,8 +42,8 @@ func openGatewayLogTestDB(t *testing.T) *db.DB {
 		CREATE TABLE gateway_request_logs (
 			id TEXT PRIMARY KEY,
 			user_id INTEGER NOT NULL,
-			channel_id INTEGER,
-			channel_name TEXT,
+			provider_id INTEGER,
+			provider_name TEXT,
 			model TEXT,
 			stream INTEGER NOT NULL DEFAULT 0,
 			status_code INTEGER NOT NULL,
@@ -92,7 +92,7 @@ func TestLoggingProviderRecordsChatCompletion(t *testing.T) {
 	if logs[0].StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", logs[0].StatusCode)
 	}
-	if logs[0].ChannelName != "test-channel" || logs[0].Model != "gpt-test" {
+	if logs[0].ProviderName != "test-channel" || logs[0].Model != "gpt-test" {
 		t.Fatalf("unexpected log: %+v", logs[0])
 	}
 	if logs[0].PromptTokens != 3 || logs[0].CompletionTokens != 5 {

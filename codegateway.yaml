@@ -1,9 +1,9 @@
 # CodeGateway Configuration
 
 server:
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   port: 8080
-  mode: "debug"
+  mode: "release"
 
 database:
   driver: "sqlite"
@@ -62,7 +62,7 @@ gateway:
     retry_count: 3
   
   # 预置渠道（启动时自动为 admin 账号创建，留空则不预置）
-  default_channels: []
+  default_providers: []
 
 platforms:
   telegram:

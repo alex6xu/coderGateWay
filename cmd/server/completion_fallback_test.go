@@ -158,7 +158,7 @@ func openCompletionTestDB(t *testing.T) *db.DB {
 func seedCompletionSchema(t *testing.T, database *db.DB) {
 	t.Helper()
 	_, err := database.Exec(`
-		CREATE TABLE channels (
+		CREATE TABLE providers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,
 			type INTEGER NOT NULL, key TEXT NOT NULL, base_url TEXT, models TEXT,
 			weight INTEGER DEFAULT 1, priority INTEGER DEFAULT 0, status INTEGER DEFAULT 1,
@@ -177,7 +177,7 @@ func seedCompletionSchema(t *testing.T, database *db.DB) {
 
 func seedCompletionChannel(t *testing.T, database *db.DB, userID int64, name, modelName string) {
 	t.Helper()
-	if _, err := database.Exec(`INSERT INTO channels (user_id, name, type, key, models, status) VALUES (?, ?, 1, 'test-key', ?, 1)`, userID, name, `["`+modelName+`"]`); err != nil {
+	if _, err := database.Exec(`INSERT INTO providers (user_id, name, type, key, models, status) VALUES (?, ?, 1, 'test-key', ?, 1)`, userID, name, `["`+modelName+`"]`); err != nil {
 		t.Fatalf("insert channel %q: %v", name, err)
 	}
 }

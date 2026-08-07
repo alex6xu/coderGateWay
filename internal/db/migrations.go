@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Channels table (Provider configurations, scoped per account)
-CREATE TABLE IF NOT EXISTS channels (
+-- Providers table (LLM provider connections, scoped per account)
+CREATE TABLE IF NOT EXISTS providers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     name TEXT NOT NULL,
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     token_id INTEGER,
-    channel_id INTEGER,
+    provider_id INTEGER,
     model TEXT,
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
@@ -148,15 +148,15 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (token_id) REFERENCES tokens(id),
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (provider_id) REFERENCES providers(id)
 );
 
 -- Gateway chat/completions request/response audit log
 CREATE TABLE IF NOT EXISTS gateway_request_logs (
     id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
-    channel_id INTEGER,
-    channel_name TEXT DEFAULT '',
+    provider_id INTEGER,
+    provider_name TEXT DEFAULT '',
     model TEXT DEFAULT '',
     stream INTEGER DEFAULT 0,
     status_code INTEGER DEFAULT 0,
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS gateway_request_logs (
     latency_ms INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (provider_id) REFERENCES providers(id)
 );
 CREATE INDEX IF NOT EXISTS idx_gateway_request_logs_user_created ON gateway_request_logs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_gateway_request_logs_model ON gateway_request_logs(user_id, model);
@@ -193,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_usage_logs_channel_id ON usage_logs(channel_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_provider_id ON usage_logs(provider_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
@@ -379,20 +379,31 @@ CREATE INDEX IF NOT EXISTS idx_session_run_inbox_session ON session_run_inbox(se
 // Indexes that require user_id columns. Created after upgrade migrations so existing
 // databases created before account isolation do not fail on CREATE INDEX.
 const userIDIndexes = `
-CREATE INDEX IF NOT EXISTS idx_channels_user_id ON channels(user_id);
+CREATE INDEX IF NOT EXISTS idx_providers_user_id ON providers(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_id ON usage_logs(user_id);
 `
 
 func Migrate(db *DB) error {
 	log.Println("Running database migrations...")
+
+	// Rename legacy channels → providers before schema CREATE, otherwise a fresh
+	// CREATE TABLE providers would leave both tables and break the rename path.
+	if err := migrateChannelsToProviders(db); err != nil {
+		return err
+	}
+	// Rename log columns before schema indexes that reference provider_id.
+	if err := migrateChannelColumnsToProvider(db); err != nil {
+		return err
+	}
+
 	_, err := db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	// Existing DBs used CREATE TABLE IF NOT EXISTS without user_id; add columns first.
-	for _, table := range []string{"channels", "sessions", "usage_logs"} {
+	for _, table := range []string{"providers", "sessions", "usage_logs"} {
 		if err := ensureUserIDColumn(db, table); err != nil {
 			return err
 		}
@@ -406,11 +417,11 @@ func Migrate(db *DB) error {
 		return err
 	}
 
-	if err := ensureChannelDefaultColumn(db); err != nil {
+	if err := ensureProviderDefaultColumn(db); err != nil {
 		return err
 	}
 
-	if err := ensureChannelAuthModeColumn(db); err != nil {
+	if err := ensureProviderAuthModeColumn(db); err != nil {
 		return err
 	}
 
@@ -481,32 +492,130 @@ func ensureWorkspaceGitColumns(db *DB) error {
 	return nil
 }
 
-func ensureChannelDefaultColumn(db *DB) error {
-	has, err := tableHasColumn(db, "channels", "is_default")
+// migrateChannelsToProviders renames the legacy channels table to providers.
+// Must run before schema CREATE TABLE providers.
+func migrateChannelsToProviders(db *DB) error {
+	hasChannels, err := tableExists(db, "channels")
 	if err != nil {
 		return err
 	}
-	if has {
+	if !hasChannels {
 		return nil
 	}
-	log.Println("Migrating channels: adding is_default")
-	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN is_default INTEGER DEFAULT 0"); err != nil {
-		return fmt.Errorf("failed to add channels.is_default: %w", err)
+	hasProviders, err := tableExists(db, "providers")
+	if err != nil {
+		return err
+	}
+	if hasProviders {
+		var providerCount, channelCount int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&providerCount)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM channels`).Scan(&channelCount)
+		if providerCount == 0 && channelCount > 0 {
+			log.Println("Migrating: empty providers + data in channels; replacing providers")
+			if _, err := db.Exec(`DROP TABLE providers`); err != nil {
+				return fmt.Errorf("drop empty providers: %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE channels RENAME TO providers`); err != nil {
+				return fmt.Errorf("rename channels to providers: %w", err)
+			}
+			return nil
+		}
+		log.Println("Migrating: dropping leftover channels table (providers already present)")
+		if _, err := db.Exec(`DROP TABLE channels`); err != nil {
+			return fmt.Errorf("drop legacy channels: %w", err)
+		}
+		return nil
+	}
+	log.Println("Migrating: renaming channels → providers")
+	if _, err := db.Exec(`ALTER TABLE channels RENAME TO providers`); err != nil {
+		return fmt.Errorf("rename channels to providers: %w", err)
 	}
 	return nil
 }
 
-func ensureChannelAuthModeColumn(db *DB) error {
-	has, err := tableHasColumn(db, "channels", "auth_mode")
+// migrateChannelColumnsToProvider renames channel_id/channel_name columns on
+// existing log tables after the providers table rename.
+func migrateChannelColumnsToProvider(db *DB) error {
+	if err := renameColumnIfNeeded(db, "usage_logs", "channel_id", "provider_id"); err != nil {
+		return err
+	}
+	if err := renameColumnIfNeeded(db, "gateway_request_logs", "channel_id", "provider_id"); err != nil {
+		return err
+	}
+	if err := renameColumnIfNeeded(db, "gateway_request_logs", "channel_name", "provider_name"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func renameColumnIfNeeded(db *DB, table, from, to string) error {
+	exists, err := tableExists(db, table)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	hasFrom, err := tableHasColumn(db, table, from)
+	if err != nil {
+		return err
+	}
+	if !hasFrom {
+		return nil
+	}
+	hasTo, err := tableHasColumn(db, table, to)
+	if err != nil {
+		return err
+	}
+	if hasTo {
+		return nil
+	}
+	log.Printf("Migrating %s: renaming %s → %s", table, from, to)
+	stmt := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s", table, from, to)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("rename %s.%s to %s: %w", table, from, to, err)
+	}
+	return nil
+}
+
+func tableExists(db *DB, table string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+		table,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	return count > 0, nil
+}
+
+func ensureProviderDefaultColumn(db *DB) error {
+	has, err := tableHasColumn(db, "providers", "is_default")
 	if err != nil {
 		return err
 	}
 	if has {
 		return nil
 	}
-	log.Println("Migrating channels: adding auth_mode")
-	if _, err := db.Exec("ALTER TABLE channels ADD COLUMN auth_mode TEXT DEFAULT 'api_key'"); err != nil {
-		return fmt.Errorf("failed to add channels.auth_mode: %w", err)
+	log.Println("Migrating providers: adding is_default")
+	if _, err := db.Exec("ALTER TABLE providers ADD COLUMN is_default INTEGER DEFAULT 0"); err != nil {
+		return fmt.Errorf("failed to add providers.is_default: %w", err)
+	}
+	return nil
+}
+
+func ensureProviderAuthModeColumn(db *DB) error {
+	has, err := tableHasColumn(db, "providers", "auth_mode")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	log.Println("Migrating providers: adding auth_mode")
+	if _, err := db.Exec("ALTER TABLE providers ADD COLUMN auth_mode TEXT DEFAULT 'api_key'"); err != nil {
+		return fmt.Errorf("failed to add providers.auth_mode: %w", err)
 	}
 	return nil
 }

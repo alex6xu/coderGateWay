@@ -6,7 +6,7 @@ const baseNavigation = [
   { name: 'Chat', href: '/', icon: '💬' },
   { name: 'Code', href: '/code', icon: '🛠️' },
   { name: 'Dashboard', href: '/dashboard', icon: '📊' },
-  { name: 'Channels', href: '/channels', icon: '🔗' },
+  { name: 'Providers', href: '/providers', icon: '🔗' },
   { name: 'Sessions', href: '/sessions', icon: '📋' },
   { name: 'Tags', href: '/tags', icon: '🏷️' },
   { name: 'Agent Tasks', href: '/agent-tasks', icon: '🤖' },

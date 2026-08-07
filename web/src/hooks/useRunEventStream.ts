@@ -113,7 +113,7 @@ export function useRunEventStream() {
         applyAssistant({ content: 'No response' })
       } else if (fullText.includes('no available channel')) {
         applyAssistant({
-          content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
+          content: '⚠️ 暂无可用提供商。请先到 Providers 页面添加 API Provider。',
         })
       }
     },

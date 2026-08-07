@@ -180,7 +180,7 @@ export default function SettingsPage() {
           <p className="text-[13px] text-muted-foreground leading-relaxed mb-3">
             对齐 OmniRoute / Claude Code：在新标签页登录 Anthropic，把授权页显示的
             <code className="mx-1 text-[12px]">code#state</code>
-            粘贴回来。连接后可在 Channels 勾选「使用订阅 OAuth」。
+            粘贴回来。连接后可在 Providers 勾选「使用订阅 OAuth」。
           </p>
           {!claudeConfigured ? (
             <p className="text-[12px] text-amber-500">服务端未启用 claude_oauth（检查 codegateway.yaml）。</p>

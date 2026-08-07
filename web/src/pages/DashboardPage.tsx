@@ -6,7 +6,7 @@ interface Stats {
   totalMessages: number
   totalTokens: number
   totalCost: number
-  activeChannels: number
+  activeProviders: number
 }
 
 export default function DashboardPage() {
@@ -16,7 +16,7 @@ export default function DashboardPage() {
     totalMessages: 0,
     totalTokens: 0,
     totalCost: 0,
-    activeChannels: 0,
+    activeProviders: 0,
   })
 
   useEffect(() => {
@@ -42,7 +42,7 @@ export default function DashboardPage() {
     { name: 'Total Messages', value: stats.totalMessages, icon: '💬', color: 'bg-purple-500/20 text-purple-400' },
     { name: 'Total Tokens', value: stats.totalTokens.toLocaleString(), icon: '🔤', color: 'bg-amber-500/20 text-amber-400' },
     { name: 'Total Cost', value: `$${stats.totalCost.toFixed(2)}`, icon: '💰', color: 'bg-green-500/20 text-green-400' },
-    { name: 'Active Channels', value: stats.activeChannels, icon: '🔗', color: 'bg-cyan-500/20 text-cyan-400' },
+    { name: 'Active Providers', value: stats.activeProviders, icon: '🔗', color: 'bg-cyan-500/20 text-cyan-400' },
   ]
 
   return (

@@ -16,8 +16,8 @@ const maxBodyBytes = 1 << 20 // 1MB
 type Entry struct {
 	ID               string    `json:"id"`
 	UserID           int64     `json:"user_id"`
-	ChannelID        int64     `json:"channel_id,omitempty"`
-	ChannelName      string    `json:"channel_name,omitempty"`
+	ProviderID        int64     `json:"provider_id,omitempty"`
+	ProviderName      string    `json:"provider_name,omitempty"`
 	Model            string    `json:"model"`
 	Stream           bool      `json:"stream"`
 	StatusCode       int       `json:"status_code"`
@@ -66,11 +66,11 @@ func (s *Store) Insert(e *Entry) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO gateway_request_logs (
-			id, user_id, channel_id, channel_name, model, stream, status_code, error,
+			id, user_id, provider_id, provider_name, model, stream, status_code, error,
 			request_body, response_body, prompt_tokens, completion_tokens, cached_tokens,
 			latency_ms, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, e.ID, e.UserID, nullInt64(e.ChannelID), e.ChannelName, e.Model, stream, e.StatusCode, e.Error,
+	`, e.ID, e.UserID, nullInt64(e.ProviderID), e.ProviderName, e.Model, stream, e.StatusCode, e.Error,
 		e.RequestBody, e.ResponseBody, e.PromptTokens, e.CompletionTokens, e.CachedTokens,
 		e.LatencyMs, e.CreatedAt)
 	if err != nil {
@@ -89,7 +89,7 @@ func (s *Store) List(userID int64, f ListFilter) ([]Entry, error) {
 	}
 
 	q := `
-		SELECT id, user_id, COALESCE(channel_id, 0), COALESCE(channel_name, ''), COALESCE(model, ''),
+		SELECT id, user_id, COALESCE(provider_id, 0), COALESCE(provider_name, ''), COALESCE(model, ''),
 		       stream, status_code, COALESCE(error, ''), prompt_tokens, completion_tokens, cached_tokens,
 		       latency_ms, created_at
 		FROM gateway_request_logs
@@ -118,7 +118,7 @@ func (s *Store) List(userID int64, f ListFilter) ([]Entry, error) {
 		var e Entry
 		var stream int
 		if err := rows.Scan(
-			&e.ID, &e.UserID, &e.ChannelID, &e.ChannelName, &e.Model,
+			&e.ID, &e.UserID, &e.ProviderID, &e.ProviderName, &e.Model,
 			&stream, &e.StatusCode, &e.Error, &e.PromptTokens, &e.CompletionTokens, &e.CachedTokens,
 			&e.LatencyMs, &e.CreatedAt,
 		); err != nil {
@@ -135,13 +135,13 @@ func (s *Store) Get(userID int64, id string) (*Entry, error) {
 	var e Entry
 	var stream int
 	err := s.db.QueryRow(`
-		SELECT id, user_id, COALESCE(channel_id, 0), COALESCE(channel_name, ''), COALESCE(model, ''),
+		SELECT id, user_id, COALESCE(provider_id, 0), COALESCE(provider_name, ''), COALESCE(model, ''),
 		       stream, status_code, COALESCE(error, ''), COALESCE(request_body, ''), COALESCE(response_body, ''),
 		       prompt_tokens, completion_tokens, cached_tokens, latency_ms, created_at
 		FROM gateway_request_logs
 		WHERE user_id = ? AND id = ?
 	`, userID, id).Scan(
-		&e.ID, &e.UserID, &e.ChannelID, &e.ChannelName, &e.Model,
+		&e.ID, &e.UserID, &e.ProviderID, &e.ProviderName, &e.Model,
 		&stream, &e.StatusCode, &e.Error, &e.RequestBody, &e.ResponseBody,
 		&e.PromptTokens, &e.CompletionTokens, &e.CachedTokens, &e.LatencyMs, &e.CreatedAt,
 	)

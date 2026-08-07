@@ -18,7 +18,7 @@ func TestChannelAndSessionIsolation(t *testing.T) {
 
 	now := time.Now()
 	_, err = mgr.db.Exec(`
-		INSERT INTO channels (user_id, name, type, key, status, created_at, updated_at)
+		INSERT INTO providers (user_id, name, type, key, status, created_at, updated_at)
 		VALUES (?, 'admin-ch', 1, 'sk-admin', 1, ?, ?), (?, 'alice-ch', 1, 'sk-alice', 1, ?, ?)
 	`, admin.ID, now, now, alice.ID, now, now)
 	if err != nil {
@@ -34,8 +34,8 @@ func TestChannelAndSessionIsolation(t *testing.T) {
 	}
 
 	var adminChannels, aliceChannels int
-	mgr.db.QueryRow("SELECT COUNT(*) FROM channels WHERE user_id = ?", admin.ID).Scan(&adminChannels)
-	mgr.db.QueryRow("SELECT COUNT(*) FROM channels WHERE user_id = ?", alice.ID).Scan(&aliceChannels)
+	mgr.db.QueryRow("SELECT COUNT(*) FROM providers WHERE user_id = ?", admin.ID).Scan(&adminChannels)
+	mgr.db.QueryRow("SELECT COUNT(*) FROM providers WHERE user_id = ?", alice.ID).Scan(&aliceChannels)
 	if adminChannels != 1 || aliceChannels != 1 {
 		t.Fatalf("channel isolation broken: admin=%d alice=%d", adminChannels, aliceChannels)
 	}
@@ -51,12 +51,12 @@ func TestChannelAndSessionIsolation(t *testing.T) {
 	if err := mgr.Delete(alice.ID); err != nil {
 		t.Fatalf("delete alice: %v", err)
 	}
-	mgr.db.QueryRow("SELECT COUNT(*) FROM channels WHERE user_id = ?", alice.ID).Scan(&aliceChannels)
+	mgr.db.QueryRow("SELECT COUNT(*) FROM providers WHERE user_id = ?", alice.ID).Scan(&aliceChannels)
 	mgr.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", alice.ID).Scan(&aliceSessions)
 	if aliceChannels != 0 || aliceSessions != 0 {
 		t.Fatalf("alice data not cleaned: channels=%d sessions=%d", aliceChannels, aliceSessions)
 	}
-	mgr.db.QueryRow("SELECT COUNT(*) FROM channels WHERE user_id = ?", admin.ID).Scan(&adminChannels)
+	mgr.db.QueryRow("SELECT COUNT(*) FROM providers WHERE user_id = ?", admin.ID).Scan(&adminChannels)
 	if adminChannels != 1 {
 		t.Fatalf("admin channel should remain, got %d", adminChannels)
 	}
