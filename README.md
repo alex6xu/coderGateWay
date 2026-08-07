@@ -224,6 +224,13 @@ codegateway/
 ├── internal/
 │   ├── gateway/           # 网关（relay/convert/router/billing — 部分为参考实现/stub）
 │   ├── agent/
+│   │   ├── agentcore/     # pigo 消息/事件/工具抽象 ✅
+│   │   ├── agentruntime/  # pigo 双层主循环 ✅
+│   │   ├── agenttool/     # 工具注册与批量执行 ✅
+│   │   ├── agentprovider/ # StreamFn 契约（非厂商实现）✅
+│   │   ├── agentlink/     # CG ↔ pigo 适配层 ✅
+│   │   ├── compaction/    # 会话 LLM 压缩 ✅
+│   │   ├── sessionrun/    # 后台 Session Run ✅
 │   │   ├── memory/        # FTS5 记忆服务 ✅
 │   │   ├── promptctx/     # Context 构建器 ✅
 │   │   ├── task/          # 任务 worker + store ✅
@@ -242,7 +249,7 @@ codegateway/
 └── codegateway.yaml
 ```
 
-> **注意**：`internal/agent/agent.go`、`internal/agent/actor/`、`internal/platform/` 目前是**未接入的骨架/死代码**——真正运行的实现全部在 `cmd/server/`。清理或接入这些包是路线图的一部分。
+> **注意**：`internal/agent/agent.go`、`internal/agent/actor/`、`internal/platform/` 目前是**未接入的骨架/死代码**。Coder 主循环在 `agent/agentruntime`（经 `agentlink` 适配），由 `cmd/server` 的 Session Run / Agent Tasks 编排。
 
 ---
 
