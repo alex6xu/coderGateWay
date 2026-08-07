@@ -118,6 +118,31 @@ func (s *Store) LatestRunForSession(sessionID string) (*Run, error) {
 	return run, err
 }
 
+// ListRunsForSession returns all runs for a session in chronological order.
+func (s *Store) ListRunsForSession(sessionID string) ([]*Run, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, user_id, workspace_id, mode, model, status, trigger_message_id,
+			error, last_seq, cancel_requested, created_at, started_at, finished_at
+		FROM session_runs
+		WHERE session_id = ?
+		ORDER BY created_at ASC, id ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*Run, 0)
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 // CollectToolSteps returns tool_step payloads in order for a run.
 func (s *Store) CollectToolSteps(runID string) ([]map[string]string, error) {
 	events, err := s.ListEventsAfter(runID, 0)

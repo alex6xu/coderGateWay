@@ -1,27 +1,20 @@
 import { useState, useEffect, useRef, ChangeEvent, useCallback } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { apiFetch, useAccount } from '../context/AccountContext'
 import VoiceInputButton from '../components/VoiceInputButton'
+import MessageBubble from '../components/MessageBubble'
 import { useVoiceInput } from '../hooks/useVoiceInput'
+import { useRunEventStream } from '../hooks/useRunEventStream'
+import { useSessionRestore } from '../hooks/useSessionRestore'
 import {
-  attachToolStepsToMessages,
-  clearLocal,
   coderSessionKey,
   coderWorkspaceKey,
   readLocal,
+  readSessionQueryParam,
   writeLocal,
-  type SessionRestorePayload,
+  type UiMessage,
 } from '../lib/sessionPersist'
 
-interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  timestamp: Date
-  model?: string
-  toolSteps?: { tool: string; args: string; result: string }[]
-}
+type Message = UiMessage
 
 interface ModelOption {
   id: string
@@ -118,16 +111,16 @@ export default function CoderPage() {
   const activeWorkspace = workspaces.find((w) => w.id === workspaceId) || null
 
   const [runId, setRunId] = useState('')
-  const runAbortRef = useRef<AbortController | null>(null)
-  const restoreGenRef = useRef(0)
+  const { consumeRunEvents, abortRunStream } = useRunEventStream()
+  const { restoreSession, persistSessionId, clearPersistedSession } = useSessionRestore()
 
   const sessionStorageKey =
     currentAccount?.id && workspaceId ? coderSessionKey(currentAccount.id, workspaceId) : ''
 
   useEffect(() => {
-    fetchModels()
-    fetchWorkspaces()
-    fetchGitHubStatus()
+    void fetchModels()
+    void fetchWorkspaces()
+    void fetchGitHubStatus()
 
     const params = new URLSearchParams(window.location.search)
     const gh = params.get('github')
@@ -155,7 +148,7 @@ export default function CoderPage() {
     writeLocal(coderWorkspaceKey(currentAccount.id), workspaceId)
   }, [currentAccount?.id, workspaceId])
 
-  // Restore session + active run after workspace is known
+  // Restore session + active run after workspace is known (?session= preferred).
   useEffect(() => {
     if (!currentAccount?.id || !workspaceId || !sessionStorageKey) {
       setMessages([])
@@ -165,61 +158,55 @@ export default function CoderPage() {
       return
     }
 
-    const saved =
-      readLocal(sessionStorageKey) ||
-      (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(sessionStorageKey) || '' : '')
-    if (!saved) {
-      setMessages([])
-      setSessionId('')
-      setRunId('')
-      setIsLoading(false)
-      return
-    }
-
-    const gen = ++restoreGenRef.current
     let cancelled = false
     ;(async () => {
       try {
-        const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, currentAccount.id)
-        if (!res.ok || cancelled || gen !== restoreGenRef.current) return
-        const data = (await res.json()) as SessionRestorePayload
-        if (cancelled || gen !== restoreGenRef.current) return
-        setSessionId(saved)
-        writeLocal(sessionStorageKey, saved)
-
-        let restored: Message[] = (data.messages || []).map((m) => ({
-          id: m.id,
-          role: m.role as Message['role'],
-          content: m.content || '',
-          timestamp: m.created_at ? new Date(m.created_at) : new Date(),
-          model: m.model,
-        }))
-
-        const active = data.active_run
-        if (active && (active.status === 'running' || active.status === 'queued')) {
-          const assistantId = `run-${active.id}`
-          if (!restored.some((m) => m.id === assistantId)) {
-            restored = [
-              ...restored,
-              {
-                id: assistantId,
-                role: 'assistant',
-                content: '',
-                timestamp: new Date(),
-                model: active.model || selectedModel || undefined,
-                toolSteps: data.active_run_tool_steps || [],
+        const result = await restoreSession({
+          accountId: currentAccount.id,
+          storageKey: sessionStorageKey,
+          consumeActiveRun: async (targetRunId, assistantId, afterSeq, model) => {
+            if (cancelled) return
+            setRunId(targetRunId)
+            setIsLoading(true)
+            await consumeRunEvents(targetRunId, assistantId, {
+              accountId: currentAccount.id,
+              afterSeq,
+              fallbackModel: model || selectedModel,
+              onSessionId: setSessionId,
+              onUserInjected: (content) => {
+                setMessages((prev) => {
+                  if (prev.some((m) => m.content === content && m.role === 'user')) return prev
+                  return [
+                    ...prev,
+                    {
+                      id: `inj-${Date.now()}`,
+                      role: 'system',
+                      content: `已加入本轮上下文：${content}`,
+                      timestamp: new Date(),
+                    },
+                  ]
+                })
               },
-            ]
-          } else {
-            restored = attachToolStepsToMessages(restored, data.active_run_tool_steps)
-          }
-          setMessages(restored)
-          setRunId(active.id)
+              setMessages,
+              setIsLoading,
+              setRunId,
+            })
+          },
+        })
+        if (cancelled) return
+        if (!result) {
+          setMessages([])
+          setSessionId('')
+          setRunId('')
+          setIsLoading(false)
+          return
+        }
+        setSessionId(result.sessionId)
+        setMessages(result.messages)
+        if (result.activeRunId) {
+          setRunId(result.activeRunId)
           setIsLoading(true)
-          await consumeRunEvents(active.id, 0, assistantId, active.model)
         } else {
-          restored = attachToolStepsToMessages(restored, data.latest_run_tool_steps)
-          setMessages(restored)
           setRunId('')
           setIsLoading(false)
         }
@@ -229,137 +216,18 @@ export default function CoderPage() {
     })()
     return () => {
       cancelled = true
-      runAbortRef.current?.abort()
+      abortRunStream()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentAccount?.id, workspaceId, sessionStorageKey])
 
   useEffect(() => {
-    if (sessionId && sessionStorageKey) {
-      writeLocal(sessionStorageKey, sessionId)
-      try {
-        sessionStorage.setItem(sessionStorageKey, sessionId)
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [sessionId, sessionStorageKey])
+    if (sessionId && sessionStorageKey) persistSessionId(sessionStorageKey, sessionId)
+  }, [sessionId, sessionStorageKey, persistSessionId])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
-
-  type AgentStreamEvent = {
-    type?: string
-    content?: string
-    session_id?: string
-    model?: string
-    step?: { tool: string; args: string; result: string }
-    tool_steps?: { tool: string; args: string; result: string }[]
-  }
-
-  const consumeRunEvents = async (
-    targetRunId: string,
-    afterSeq: number,
-    assistantId: string,
-    fallbackModel?: string,
-  ) => {
-    runAbortRef.current?.abort()
-    const ac = new AbortController()
-    runAbortRef.current = ac
-    const response = await apiFetch(
-      `/v1/agent/runs/${targetRunId}/events?after_seq=${afterSeq}`,
-      { signal: ac.signal },
-      currentAccount?.id,
-    )
-    if (!response.ok || !response.body) {
-      const data = await response.json().catch(() => ({}))
-      throw new Error(data.error || `HTTP ${response.status}`)
-    }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullText = ''
-    const steps: { tool: string; args: string; result: string }[] = []
-    const applyAssistant = (patch: Partial<Message>) => {
-      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)))
-    }
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() || ''
-        for (const part of parts) {
-          const line = part.trim()
-          if (!line.startsWith('data:')) continue
-          const payload = line.replace(/^data:\s*/, '')
-          if (payload === '[DONE]') continue
-          let ev: AgentStreamEvent
-          try {
-            ev = JSON.parse(payload)
-          } catch {
-            continue
-          }
-          if (ev.session_id) setSessionId(ev.session_id)
-          if (ev.type === 'delta' && ev.content) {
-            fullText += ev.content
-            applyAssistant({ content: fullText, model: ev.model || fallbackModel || selectedModel })
-          } else if (ev.type === 'tool_step' && ev.step) {
-            steps.push(ev.step)
-            const patch: Partial<Message> = { toolSteps: [...steps] }
-            if (fullText) patch.content = fullText
-            applyAssistant(patch)
-          } else if (ev.type === 'user_injected' && ev.content) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.content === ev.content && m.role === 'user')) return prev
-              return [
-                ...prev,
-                {
-                  id: `inj-${Date.now()}`,
-                  role: 'system',
-                  content: `已加入本轮上下文：${ev.content}`,
-                  timestamp: new Date(),
-                },
-              ]
-            })
-          } else if (ev.type === 'done') {
-            // Prefer authoritative final transcript when present; otherwise keep streamed text.
-            if (ev.content) fullText = ev.content
-            if (ev.tool_steps?.length) {
-              steps.splice(0, steps.length, ...ev.tool_steps)
-            }
-            applyAssistant({
-              content: fullText,
-              model: ev.model || fallbackModel || selectedModel,
-              toolSteps: steps.length ? [...steps] : undefined,
-            })
-          } else if (ev.type === 'error') {
-            const errText = ev.content || 'Agent error'
-            if (fullText) fullText = `${fullText}\n\n⚠️ ${errText}`
-            else fullText = errText
-            applyAssistant({ content: fullText, toolSteps: steps.length ? [...steps] : undefined })
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return
-      throw err
-    } finally {
-      if (runAbortRef.current === ac) {
-        setIsLoading(false)
-        setRunId('')
-      }
-    }
-    if (!fullText && steps.length === 0) {
-      applyAssistant({ content: 'No response' })
-    } else if (fullText.includes('no available channel')) {
-      applyAssistant({
-        content: '⚠️ 暂无可用渠道。请先到 Channels 页面添加 API Provider。',
-      })
-    }
-  }
 
   const fetchModels = async () => {
     try {
@@ -391,11 +259,28 @@ export default function CoderPage() {
       const list: WorkspaceInfo[] = data.workspaces || []
       setWorkspaces(list)
       if (list.length > 0) {
-        const requestedWorkspaceID = new URLSearchParams(window.location.search).get('workspace')
+        const params = new URLSearchParams(window.location.search)
+        const requestedWorkspaceID = params.get('workspace')
+        const sessionFromUrl = readSessionQueryParam()
+        let workspaceFromSession = ''
+        if (sessionFromUrl && currentAccount?.id) {
+          try {
+            const sessRes = await apiFetch(`/v1/agent/sessions/${sessionFromUrl}`, {}, currentAccount.id)
+            if (sessRes.ok) {
+              const sessData = await sessRes.json()
+              workspaceFromSession = sessData.workspace_id || sessData.active_run?.workspace_id || sessData.latest_run?.workspace_id || ''
+            }
+          } catch {
+            /* ignore */
+          }
+        }
         const savedWorkspaceID = currentAccount?.id ? readLocal(coderWorkspaceKey(currentAccount.id)) : ''
         setWorkspaceId((prev) => {
           if (requestedWorkspaceID && list.some((workspace) => workspace.id === requestedWorkspaceID)) {
             return requestedWorkspaceID
+          }
+          if (workspaceFromSession && list.some((workspace) => workspace.id === workspaceFromSession)) {
+            return workspaceFromSession
           }
           if (prev && list.some((workspace) => workspace.id === prev)) return prev
           if (savedWorkspaceID && list.some((workspace) => workspace.id === savedWorkspaceID)) {
@@ -744,11 +629,11 @@ export default function CoderPage() {
     }
 
     setIsLoading(true)
-    const assistantId = (Date.now() + 1).toString()
+    const provisionalAssistantId = `pending-${Date.now()}`
     setMessages((prev) => [
       ...prev,
       {
-        id: assistantId,
+        id: provisionalAssistantId,
         role: 'assistant',
         content: '',
         timestamp: new Date(),
@@ -776,13 +661,52 @@ export default function CoderPage() {
       )
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
-      if (data.session_id) setSessionId(data.session_id)
-      if (data.run_id) setRunId(data.run_id)
-      await consumeRunEvents(data.run_id, 0, assistantId, selectedModel)
+      if (data.session_id) {
+        setSessionId(data.session_id)
+        if (sessionStorageKey) persistSessionId(sessionStorageKey, data.session_id)
+      }
+      const assistantId = data.run_id ? `run-${data.run_id}` : provisionalAssistantId
+      if (assistantId !== provisionalAssistantId) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === provisionalAssistantId ? { ...m, id: assistantId } : m)),
+        )
+      }
+      if (data.run_id) {
+        setRunId(data.run_id)
+        await consumeRunEvents(data.run_id, assistantId, {
+          accountId: currentAccount?.id,
+          fallbackModel: selectedModel,
+          onSessionId: setSessionId,
+          onUserInjected: (injected) => {
+            setMessages((prev) => {
+              if (prev.some((m) => m.content === injected && m.role === 'user')) return prev
+              return [
+                ...prev,
+                {
+                  id: `inj-${Date.now()}`,
+                  role: 'system',
+                  content: `已加入本轮上下文：${injected}`,
+                  timestamp: new Date(),
+                },
+              ]
+            })
+          },
+          setMessages,
+          setIsLoading,
+          setRunId,
+        })
+      } else {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: data.response || data.error || 'No response' } : m,
+          ),
+        )
+        setIsLoading(false)
+      }
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId
+          m.id === provisionalAssistantId || m.id.startsWith('run-')
             ? {
                 ...m,
                 content:
@@ -798,19 +722,12 @@ export default function CoderPage() {
   }
 
   const clearChat = () => {
-    runAbortRef.current?.abort()
+    abortRunStream()
     setMessages([])
     setSessionId('')
     setRunId('')
     setIsLoading(false)
-    if (sessionStorageKey) {
-      clearLocal(sessionStorageKey)
-      try {
-        sessionStorage.removeItem(sessionStorageKey)
-      } catch {
-        /* ignore */
-      }
-    }
+    if (sessionStorageKey) clearPersistedSession(sessionStorageKey)
   }
 
   const downloadWorkspace = () => {
@@ -849,18 +766,11 @@ export default function CoderPage() {
         setUploadError(data.error || '删除工作区失败')
         return
       }
-      if (sessionStorageKey) {
-        clearLocal(sessionStorageKey)
-        try {
-          sessionStorage.removeItem(sessionStorageKey)
-        } catch {
-          /* ignore */
-        }
-      }
+      if (sessionStorageKey) clearPersistedSession(sessionStorageKey)
       setSessionId('')
       setRunId('')
       setIsLoading(false)
-      runAbortRef.current?.abort()
+      abortRunStream()
       await fetchWorkspaces()
       setMessages([
         {
@@ -1128,78 +1038,7 @@ export default function CoderPage() {
             </div>
           </div>
         ) : (
-          messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
-            >
-              <div
-                className={`max-w-[80%] rounded-xl px-4 py-2.5 ${
-                  msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground'
-                    : msg.role === 'system'
-                      ? 'bg-amber-500/10 border border-amber-500/30'
-                      : 'bg-card border border-border'
-                }`}
-              >
-                {msg.role === 'user' ? (
-                  <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                ) : (
-                  <div className="markdown-body text-[13px]">
-                    {msg.content ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                    ) : msg.toolSteps && msg.toolSteps.length > 0 ? (
-                      <p className="text-muted-foreground text-[12px]">正在调用工具…</p>
-                    ) : isLoading ? (
-                      <p className="text-muted-foreground text-[12px]">模型输出中…</p>
-                    ) : null}
-                  </div>
-                )}
-                {msg.toolSteps && msg.toolSteps.length > 0 && (
-                  <details open className="mt-3 text-[12px] text-muted-foreground border-t border-border/60 pt-2">
-                    <summary className="cursor-pointer text-foreground/80 font-medium">
-                      执行过程 · {msg.toolSteps.length} 步工具调用
-                    </summary>
-                    <div className="mt-2 space-y-2">
-                      {msg.toolSteps.map((s, idx) => (
-                        <details key={`${msg.id}-step-${idx}`} className="rounded-lg border border-border/70 bg-background/60 px-2.5 py-2">
-                          <summary className="cursor-pointer font-mono text-[11px] text-foreground break-all">
-                            {idx + 1}. {s.tool}
-                            {s.args ? ` (${s.args.length > 80 ? `${s.args.slice(0, 80)}…` : s.args})` : ''}
-                          </summary>
-                          {s.args && (
-                            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">
-                              {s.args}
-                            </pre>
-                          )}
-                          {s.result && (
-                            <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 text-[11px] text-foreground/90">
-                              {s.result}
-                            </pre>
-                          )}
-                        </details>
-                      ))}
-                    </div>
-                  </details>
-                )}
-                <div
-                  className={`flex items-center gap-2 mt-1.5 text-[10px] ${
-                    msg.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'
-                  }`}
-                >
-                  <span>
-                    {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                  {msg.model && (
-                    <>
-                      <span>·</span>
-                      <span>{msg.model}</span>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))
+          messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)
         )}
 
         {isLoading && (

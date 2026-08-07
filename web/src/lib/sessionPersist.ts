@@ -1,4 +1,4 @@
-/** Browser keys for restoring Code / Chat sessions across route changes. */
+/** Browser keys and helpers for restoring Chat / Coder sessions. */
 
 export function coderWorkspaceKey(accountId: number) {
   return `cg_coder_workspace_${accountId}`
@@ -33,12 +33,47 @@ export function clearLocal(key: string) {
   writeLocal(key, '')
 }
 
+export function readSessionQueryParam(search = typeof window !== 'undefined' ? window.location.search : ''): string {
+  try {
+    return new URLSearchParams(search).get('session') || new URLSearchParams(search).get('resume') || ''
+  } catch {
+    return ''
+  }
+}
+
+export function writeSessionQueryParam(sessionId: string) {
+  try {
+    const url = new URL(window.location.href)
+    if (sessionId) url.searchParams.set('session', sessionId)
+    else url.searchParams.delete('session')
+    url.searchParams.delete('resume')
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  } catch {
+    /* ignore */
+  }
+}
+
+export type ChatMessageRole = 'user' | 'assistant' | 'system'
+
+export type ToolStep = { tool: string; args: string; result: string }
+
+export type UiMessage = {
+  id: string
+  role: ChatMessageRole
+  content: string
+  timestamp: Date
+  model?: string
+  toolSteps?: ToolStep[]
+}
+
 export type RestoredSessionMessage = {
   id: string
   role: string
   content: string
   model?: string
   created_at?: string
+  tool_steps?: ToolStep[]
+  toolSteps?: ToolStep[]
 }
 
 export type ActiveRunInfo = {
@@ -46,28 +81,58 @@ export type ActiveRunInfo = {
   status: string
   last_seq: number
   model?: string
+  workspace_id?: string
 }
 
 export type SessionRestorePayload = {
+  session?: {
+    id?: string
+    title?: string
+    platform?: string
+    message_count?: number
+  }
   messages: RestoredSessionMessage[]
+  workspace_id?: string
   active_run?: ActiveRunInfo
-  active_run_tool_steps?: { tool: string; args: string; result: string }[]
+  active_run_tool_steps?: ToolStep[]
   latest_run?: ActiveRunInfo
-  latest_run_tool_steps?: { tool: string; args: string; result: string }[]
+  latest_run_tool_steps?: ToolStep[]
+  last_event_seq?: number
+}
+
+export function mapRestoredMessages(messages: RestoredSessionMessage[] | undefined): UiMessage[] {
+  return (messages || []).map((m) => ({
+    id: m.id,
+    role: (m.role as ChatMessageRole) || 'assistant',
+    content: m.content || '',
+    timestamp: m.created_at ? new Date(m.created_at) : new Date(),
+    model: m.model,
+    toolSteps: m.tool_steps || m.toolSteps,
+  }))
 }
 
 /** Attach tool steps from a finished/active run onto the last assistant message when missing. */
-export function attachToolStepsToMessages<T extends { id: string; role: string; toolSteps?: { tool: string; args: string; result: string }[] }>(
+export function attachToolStepsToMessages<T extends { id: string; role: string; toolSteps?: ToolStep[] }>(
   messages: T[],
-  steps?: { tool: string; args: string; result: string }[],
+  steps?: ToolStep[],
 ): T[] {
   if (!steps?.length) return messages
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'assistant') {
+      if (messages[i].toolSteps?.length) return messages
       const next = [...messages]
       next[i] = { ...next[i], toolSteps: steps }
       return next
     }
   }
   return messages
+}
+
+export type AgentStreamEvent = {
+  type?: string
+  content?: string
+  session_id?: string
+  model?: string
+  step?: ToolStep
+  tool_steps?: ToolStep[]
 }

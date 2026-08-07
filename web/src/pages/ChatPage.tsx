@@ -1,51 +1,30 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { apiFetch, useAccount } from '../context/AccountContext'
 import VoiceInputButton from '../components/VoiceInputButton'
+import MessageList from '../components/MessageList'
 import { useVoiceInput } from '../hooks/useVoiceInput'
-import {
-  attachToolStepsToMessages,
-  chatSessionKey,
-  clearLocal,
-  readLocal,
-  writeLocal,
-  type SessionRestorePayload,
-} from '../lib/sessionPersist'
-
-interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  timestamp: Date
-  model?: string
-  toolSteps?: { tool: string; args: string; result: string }[]
-}
+import { useRunEventStream } from '../hooks/useRunEventStream'
+import { useSessionRestore } from '../hooks/useSessionRestore'
+import { chatSessionKey, type UiMessage } from '../lib/sessionPersist'
 
 export default function ChatPage() {
   const { currentAccount } = useAccount()
-  const [messages, setMessages] = useState<Message[]>([])
+  const [messages, setMessages] = useState<UiMessage[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [connected, setConnected] = useState(false)
   const [sessionId, setSessionId] = useState('')
   const [runId, setRunId] = useState('')
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const runAbortRef = useRef<AbortController | null>(null)
-  const restoreGenRef = useRef(0)
 
   const storageKey = currentAccount?.id ? chatSessionKey(currentAccount.id) : ''
+  const { consumeRunEvents, abortRunStream } = useRunEventStream()
+  const { restoreSession, persistSessionId, clearPersistedSession } = useSessionRestore()
 
   useEffect(() => {
     if (!currentAccount?.id || !storageKey) return
 
-    const saved =
-      readLocal(storageKey) ||
-      (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(storageKey) || '' : '')
-
-    const gen = ++restoreGenRef.current
     let cancelled = false
-
     ;(async () => {
-      // Lightweight connectivity probe via models list (no WS dependency for chat persistence).
       try {
         const probe = await apiFetch('/v1/models', {}, currentAccount.id)
         if (!cancelled) setConnected(probe.ok)
@@ -53,56 +32,39 @@ export default function ChatPage() {
         if (!cancelled) setConnected(false)
       }
 
-      if (!saved) {
-        setMessages([])
-        setSessionId('')
-        setRunId('')
-        setIsLoading(false)
-        return
-      }
-
       try {
-        const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, currentAccount.id)
-        if (!res.ok || cancelled || gen !== restoreGenRef.current) return
-        const data = (await res.json()) as SessionRestorePayload
-        if (cancelled || gen !== restoreGenRef.current) return
-
-        setSessionId(saved)
-        writeLocal(storageKey, saved)
-
-        let restored: Message[] = (data.messages || []).map((m) => ({
-          id: m.id,
-          role: m.role as Message['role'],
-          content: m.content || '',
-          timestamp: m.created_at ? new Date(m.created_at) : new Date(),
-          model: m.model,
-        }))
-
-        const active = data.active_run
-        if (active && (active.status === 'running' || active.status === 'queued')) {
-          const assistantId = `run-${active.id}`
-          if (!restored.some((m) => m.id === assistantId)) {
-            restored = [
-              ...restored,
-              {
-                id: assistantId,
-                role: 'assistant',
-                content: '',
-                timestamp: new Date(),
-                model: active.model,
-                toolSteps: data.active_run_tool_steps || [],
-              },
-            ]
-          } else {
-            restored = attachToolStepsToMessages(restored, data.active_run_tool_steps)
-          }
-          setMessages(restored)
-          setRunId(active.id)
+        const result = await restoreSession({
+          accountId: currentAccount.id,
+          storageKey,
+          consumeActiveRun: async (targetRunId, assistantId, afterSeq, model) => {
+            if (cancelled) return
+            setRunId(targetRunId)
+            setIsLoading(true)
+            await consumeRunEvents(targetRunId, assistantId, {
+              accountId: currentAccount.id,
+              afterSeq,
+              fallbackModel: model,
+              onSessionId: setSessionId,
+              setMessages,
+              setIsLoading,
+              setRunId,
+            })
+          },
+        })
+        if (cancelled) return
+        if (!result) {
+          setMessages([])
+          setSessionId('')
+          setRunId('')
+          setIsLoading(false)
+          return
+        }
+        setSessionId(result.sessionId)
+        setMessages(result.messages)
+        if (result.activeRunId) {
+          setRunId(result.activeRunId)
           setIsLoading(true)
-          await consumeRunEvents(active.id, 0, assistantId, active.model)
         } else {
-          restored = attachToolStepsToMessages(restored, data.latest_run_tool_steps)
-          setMessages(restored)
           setRunId('')
           setIsLoading(false)
         }
@@ -113,25 +75,14 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true
-      runAbortRef.current?.abort()
+      abortRunStream()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentAccount?.id, storageKey])
 
   useEffect(() => {
-    if (sessionId && storageKey) {
-      writeLocal(storageKey, sessionId)
-      try {
-        sessionStorage.setItem(storageKey, sessionId)
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [sessionId, storageKey])
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading])
+    if (sessionId && storageKey) persistSessionId(storageKey, sessionId)
+  }, [sessionId, storageKey, persistSessionId])
 
   const appendVoiceText = useCallback((text: string) => {
     setInput((prev) => {
@@ -150,100 +101,6 @@ export default function ChatPage() {
     },
   })
 
-  type AgentStreamEvent = {
-    type?: string
-    content?: string
-    session_id?: string
-    model?: string
-    step?: { tool: string; args: string; result: string }
-    tool_steps?: { tool: string; args: string; result: string }[]
-  }
-
-  const consumeRunEvents = async (
-    targetRunId: string,
-    afterSeq: number,
-    assistantId: string,
-    fallbackModel?: string,
-  ) => {
-    runAbortRef.current?.abort()
-    const ac = new AbortController()
-    runAbortRef.current = ac
-    const response = await apiFetch(
-      `/v1/agent/runs/${targetRunId}/events?after_seq=${afterSeq}`,
-      { signal: ac.signal },
-      currentAccount?.id,
-    )
-    if (!response.ok || !response.body) {
-      const data = await response.json().catch(() => ({}))
-      throw new Error(data.error || `HTTP ${response.status}`)
-    }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullText = ''
-    const steps: { tool: string; args: string; result: string }[] = []
-    const applyAssistant = (patch: Partial<Message>) => {
-      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)))
-    }
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() || ''
-        for (const part of parts) {
-          const line = part.trim()
-          if (!line.startsWith('data:')) continue
-          const payload = line.replace(/^data:\s*/, '')
-          if (payload === '[DONE]') continue
-          let ev: AgentStreamEvent
-          try {
-            ev = JSON.parse(payload)
-          } catch {
-            continue
-          }
-          if (ev.session_id) setSessionId(ev.session_id)
-          if (ev.type === 'delta' && ev.content) {
-            fullText += ev.content
-            applyAssistant({ content: fullText, model: ev.model || fallbackModel })
-          } else if (ev.type === 'tool_step' && ev.step) {
-            steps.push(ev.step)
-            const patch: Partial<Message> = { toolSteps: [...steps] }
-            if (fullText) patch.content = fullText
-            applyAssistant(patch)
-          } else if (ev.type === 'done') {
-            if (ev.content) fullText = ev.content
-            if (ev.tool_steps?.length) {
-              steps.splice(0, steps.length, ...ev.tool_steps)
-            }
-            applyAssistant({
-              content: fullText,
-              model: ev.model || fallbackModel,
-              toolSteps: steps.length ? [...steps] : undefined,
-            })
-          } else if (ev.type === 'error') {
-            const errText = ev.content || 'error'
-            if (fullText) fullText = `${fullText}\n\n⚠️ ${errText}`
-            else fullText = errText
-            applyAssistant({ content: fullText, toolSteps: steps.length ? [...steps] : undefined })
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') return
-      throw err
-    } finally {
-      if (runAbortRef.current === ac) {
-        setIsLoading(false)
-        setRunId('')
-      }
-    }
-    if (!fullText && steps.length === 0) {
-      applyAssistant({ content: 'No response' })
-    }
-  }
-
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return
     if (voice.listening) {
@@ -251,7 +108,7 @@ export default function ChatPage() {
     }
 
     const text = input
-    const userMessage: Message = {
+    const userMessage: UiMessage = {
       id: Date.now().toString(),
       role: 'user',
       content: text,
@@ -280,7 +137,7 @@ export default function ChatPage() {
 
       if (data.session_id) {
         setSessionId(data.session_id)
-        if (storageKey) writeLocal(storageKey, data.session_id)
+        if (storageKey) persistSessionId(storageKey, data.session_id)
       }
 
       const assistantId = data.run_id ? `run-${data.run_id}` : Date.now().toString()
@@ -297,7 +154,13 @@ export default function ChatPage() {
 
       if (data.run_id) {
         setRunId(data.run_id)
-        await consumeRunEvents(data.run_id, 0, assistantId)
+        await consumeRunEvents(data.run_id, assistantId, {
+          accountId: currentAccount?.id,
+          onSessionId: setSessionId,
+          setMessages,
+          setIsLoading,
+          setRunId,
+        })
       } else {
         setMessages((prev) =>
           prev.map((m) =>
@@ -306,7 +169,7 @@ export default function ChatPage() {
         )
         setIsLoading(false)
       }
-    } catch (error) {
+    } catch {
       setMessages((prev) => [
         ...prev,
         {
@@ -321,19 +184,12 @@ export default function ChatPage() {
   }
 
   const clearChat = () => {
-    runAbortRef.current?.abort()
+    abortRunStream()
     setMessages([])
     setSessionId('')
     setRunId('')
     setIsLoading(false)
-    if (storageKey) {
-      clearLocal(storageKey)
-      try {
-        sessionStorage.removeItem(storageKey)
-      } catch {
-        /* ignore */
-      }
-    }
+    if (storageKey) clearPersistedSession(storageKey)
   }
 
   return (
@@ -365,18 +221,29 @@ export default function ChatPage() {
         </button>
       </header>
 
-      <div className="flex-1 overflow-auto p-6 space-y-4">
-        {messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
+      <MessageList
+        messages={messages}
+        isLoading={isLoading}
+        empty={
+          <div className="flex-1 flex items-center justify-center">
             <div className="text-center animate-fade-in">
               <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="#3b82f6"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
               <h3 className="text-base font-semibold text-foreground mb-1.5">Start a conversation</h3>
               <p className="text-[13px] text-muted-foreground mb-4 max-w-sm">
-                Ask anything. Switching pages will keep this session and reopen any in-progress reply.
+                Ask anything. Switching pages keeps this session. Open history from Sessions to resume.
               </p>
               <div className="text-left bg-card border border-border rounded-xl p-4 max-w-sm mx-auto">
                 <p className="text-[12px] font-medium text-foreground mb-2">Tips:</p>
@@ -388,68 +255,8 @@ export default function ChatPage() {
               </div>
             </div>
           </div>
-        ) : (
-          messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
-            >
-              <div
-                className={`max-w-[80%] rounded-xl px-4 py-2.5 ${
-                  msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground'
-                    : msg.role === 'system'
-                      ? 'bg-amber-500/10 border border-amber-500/30'
-                      : 'bg-card border border-border'
-                }`}
-              >
-                <p className="text-[13px] whitespace-pre-wrap">{msg.content}</p>
-                {msg.toolSteps && msg.toolSteps.length > 0 && (
-                  <details open className="mt-3 text-[12px] text-muted-foreground border-t border-border/60 pt-2">
-                    <summary className="cursor-pointer text-foreground/80 font-medium">
-                      执行过程 · {msg.toolSteps.length} 步工具调用
-                    </summary>
-                    <div className="mt-2 space-y-2">
-                      {msg.toolSteps.map((step, idx) => (
-                        <details key={`${msg.id}-tool-${idx}`} className="rounded-lg border border-border/70 bg-background/50 px-2.5 py-2">
-                          <summary className="cursor-pointer font-mono text-[11px] text-foreground break-all">
-                            {idx + 1}. {step.tool}
-                          </summary>
-                          {step.args && (
-                            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] opacity-90">
-                              {step.args}
-                            </pre>
-                          )}
-                          {step.result && (
-                            <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-2 text-[11px] text-foreground/90">
-                              {step.result}
-                            </pre>
-                          )}
-                        </details>
-                      ))}
-                    </div>
-                  </details>
-                )}
-                <p className={`text-[11px] mt-1.5 ${msg.role === 'user' ? 'text-primary-foreground/60' : 'text-muted-foreground'}`}>
-                  {msg.timestamp.toLocaleTimeString()}
-                </p>
-              </div>
-            </div>
-          ))
-        )}
-        {isLoading && (
-          <div className="flex justify-start animate-fade-in">
-            <div className="bg-card border border-border rounded-xl px-4 py-3">
-              <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse"></div>
-                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div>
-                <div className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>
-              </div>
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
+        }
+      />
 
       <div className="p-4 border-t border-border">
         <div className="flex gap-2 max-w-3xl mx-auto">

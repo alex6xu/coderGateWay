@@ -1126,10 +1126,36 @@ func handleListSessions(database *db.DB) gin.HandlerFunc {
 			return
 		}
 
-		rows, err := database.Query(`
-			SELECT id, title, platform, message_count, created_at, updated_at
-			FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 50
-		`, accountID)
+		platformFilter := strings.TrimSpace(c.Query("platform"))
+
+		query := `
+			SELECT s.id, s.title, s.platform, s.message_count, s.created_at, s.updated_at,
+				COALESCE((
+					SELECT m.content FROM messages m
+					WHERE m.session_id = s.id
+					ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+				), '') AS preview,
+				COALESCE((
+					SELECT r.workspace_id FROM session_runs r
+					WHERE r.session_id = s.id AND COALESCE(r.workspace_id, '') != ''
+					ORDER BY r.created_at DESC, r.id DESC LIMIT 1
+				), '') AS workspace_id,
+				COALESCE((
+					SELECT r.status FROM session_runs r
+					WHERE r.session_id = s.id AND r.status IN ('queued', 'running')
+					ORDER BY r.created_at DESC, r.id DESC LIMIT 1
+				), '') AS active_run_status
+			FROM sessions s
+			WHERE s.user_id = ?
+		`
+		args := []interface{}{accountID}
+		if platformFilter != "" {
+			query += ` AND s.platform = ?`
+			args = append(args, platformFilter)
+		}
+		query += ` ORDER BY s.updated_at DESC LIMIT 50`
+
+		rows, err := database.Query(query, args...)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query sessions"})
 			return
@@ -1138,19 +1164,35 @@ func handleListSessions(database *db.DB) gin.HandlerFunc {
 
 		sessions := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var id, title, platform string
+			var id, title, platform, preview, workspaceID, activeStatus string
 			var messageCount int
 			var createdAt, updatedAt time.Time
-			rows.Scan(&id, &title, &platform, &messageCount, &createdAt, &updatedAt)
+			if err := rows.Scan(&id, &title, &platform, &messageCount, &createdAt, &updatedAt, &preview, &workspaceID, &activeStatus); err != nil {
+				continue
+			}
 
-			sessions = append(sessions, map[string]interface{}{
+			item := map[string]interface{}{
 				"id":            id,
 				"title":         title,
 				"platform":      platform,
 				"message_count": messageCount,
 				"created_at":    createdAt,
 				"updated_at":    updatedAt,
-			})
+			}
+			if preview != "" {
+				runes := []rune(preview)
+				if len(runes) > 120 {
+					preview = string(runes[:120]) + "…"
+				}
+				item["preview"] = preview
+			}
+			if workspaceID != "" {
+				item["workspace_id"] = workspaceID
+			}
+			if activeStatus != "" {
+				item["active_run_status"] = activeStatus
+			}
+			sessions = append(sessions, item)
 		}
 
 		c.JSON(http.StatusOK, gin.H{"sessions": sessions})
@@ -1223,6 +1265,10 @@ func handleGetSession(database *db.DB, rt *sessionRunRuntime) gin.HandlerFunc {
 			messages = append(messages, msg)
 		}
 
+		if rt != nil {
+			attachToolStepsToMessages(rt, id, messages)
+		}
+
 		resp := gin.H{
 			"session":  session,
 			"messages": messages,
@@ -1234,14 +1280,76 @@ func handleGetSession(database *db.DB, rt *sessionRunRuntime) gin.HandlerFunc {
 				if steps, err := rt.store.CollectToolSteps(active.ID); err == nil && len(steps) > 0 {
 					resp["active_run_tool_steps"] = steps
 				}
+				if active.WorkspaceID != "" {
+					resp["workspace_id"] = active.WorkspaceID
+				}
 			} else if latest, err := rt.store.LatestRunForSession(id); err == nil && latest != nil {
 				resp["latest_run"] = latest
 				if steps, err := rt.store.CollectToolSteps(latest.ID); err == nil && len(steps) > 0 {
 					resp["latest_run_tool_steps"] = steps
 				}
+				if latest.WorkspaceID != "" {
+					resp["workspace_id"] = latest.WorkspaceID
+				}
 			}
 		}
 		c.JSON(http.StatusOK, resp)
+	}
+}
+
+// attachToolStepsToMessages maps each historical run's tool steps onto the
+// first assistant message that follows that run's trigger user message.
+func attachToolStepsToMessages(rt *sessionRunRuntime, sessionID string, messages []map[string]interface{}) {
+	if rt == nil || rt.store == nil || len(messages) == 0 {
+		return
+	}
+	runs, err := rt.store.ListRunsForSession(sessionID)
+	if err != nil || len(runs) == 0 {
+		return
+	}
+
+	indexByID := make(map[string]int, len(messages))
+	for i, msg := range messages {
+		if id, ok := msg["id"].(string); ok && id != "" {
+			indexByID[id] = i
+		}
+	}
+
+	usedAssistant := make(map[int]bool)
+	for _, run := range runs {
+		steps, err := rt.store.CollectToolSteps(run.ID)
+		if err != nil || len(steps) == 0 {
+			continue
+		}
+		start := 0
+		if run.TriggerMessageID != "" {
+			if idx, ok := indexByID[run.TriggerMessageID]; ok {
+				start = idx + 1
+			}
+		}
+		attached := false
+		for i := start; i < len(messages); i++ {
+			role, _ := messages[i]["role"].(string)
+			if role != "assistant" || usedAssistant[i] {
+				continue
+			}
+			messages[i]["tool_steps"] = steps
+			usedAssistant[i] = true
+			attached = true
+			break
+		}
+		if !attached {
+			// Fallback: last unused assistant message.
+			for i := len(messages) - 1; i >= 0; i-- {
+				role, _ := messages[i]["role"].(string)
+				if role != "assistant" || usedAssistant[i] {
+					continue
+				}
+				messages[i]["tool_steps"] = steps
+				usedAssistant[i] = true
+				break
+			}
+		}
 	}
 }
 

@@ -1,7 +1,16 @@
 import { useState, useEffect, useRef, ChangeEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { apiFetch, useAccount } from '../context/AccountContext'
+import ToolStepCard from '../components/ToolStepCard'
+import {
+  chatSessionKey,
+  coderSessionKey,
+  coderWorkspaceKey,
+  writeLocal,
+  type ToolStep,
+} from '../lib/sessionPersist'
 
 interface Session {
   id: string
@@ -10,6 +19,9 @@ interface Session {
   message_count: number
   created_at: string
   updated_at: string
+  preview?: string
+  workspace_id?: string
+  active_run_status?: string
 }
 
 interface Message {
@@ -19,6 +31,7 @@ interface Message {
   model?: string
   provider?: string
   created_at: string
+  tool_steps?: ToolStep[]
 }
 
 interface PreviewMsg {
@@ -28,9 +41,12 @@ interface PreviewMsg {
 
 export default function SessionsPage() {
   const { currentAccount } = useAccount()
+  const navigate = useNavigate()
   const [sessions, setSessions] = useState<Session[]>([])
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
+  const [selectedMeta, setSelectedMeta] = useState<Session | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [detailWorkspaceId, setDetailWorkspaceId] = useState('')
   const [loading, setLoading] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importText, setImportText] = useState('')
@@ -43,8 +59,9 @@ export default function SessionsPage() {
   useEffect(() => {
     if (currentAccount) {
       setSelectedSession(null)
+      setSelectedMeta(null)
       setMessages([])
-      fetchSessions()
+      void fetchSessions()
     }
   }, [currentAccount?.id])
 
@@ -60,20 +77,41 @@ export default function SessionsPage() {
     }
   }
 
-  const fetchSessionDetail = async (sessionId: string) => {
+  const fetchSessionDetail = async (session: Session) => {
     setLoading(true)
-    setSelectedSession(sessionId)
+    setSelectedSession(session.id)
+    setSelectedMeta(session)
+    setDetailWorkspaceId(session.workspace_id || '')
     try {
-      const response = await apiFetch(`/v1/agent/sessions/${sessionId}`, {}, currentAccount?.id)
+      const response = await apiFetch(`/v1/agent/sessions/${session.id}`, {}, currentAccount?.id)
       if (response.ok) {
         const data = await response.json()
         setMessages(data.messages || [])
+        if (data.workspace_id) setDetailWorkspaceId(data.workspace_id)
       }
     } catch (error) {
       console.error('Failed to fetch session detail:', error)
     } finally {
       setLoading(false)
     }
+  }
+
+  const continueSession = (session: Session) => {
+    if (!currentAccount?.id) return
+    const accountId = currentAccount.id
+    if (session.platform === 'coder') {
+      const workspaceId = detailWorkspaceId || session.workspace_id || ''
+      if (workspaceId) {
+        writeLocal(coderWorkspaceKey(accountId), workspaceId)
+        writeLocal(coderSessionKey(accountId, workspaceId), session.id)
+        navigate(
+          `/code?workspace=${encodeURIComponent(workspaceId)}&session=${encodeURIComponent(session.id)}`,
+        )
+        return
+      }
+    }
+    writeLocal(chatSessionKey(accountId), session.id)
+    navigate(`/?session=${encodeURIComponent(session.id)}`)
   }
 
   const onPickFile = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -141,7 +179,15 @@ export default function SessionsPage() {
       setPreview(null)
       await fetchSessions()
       if (data.session?.id) {
-        await fetchSessionDetail(data.session.id)
+        const imported: Session = {
+          id: data.session.id,
+          title: data.session.title || 'Imported',
+          platform: data.session.platform || 'import',
+          message_count: data.session.message_count || 0,
+          created_at: data.session.created_at || new Date().toISOString(),
+          updated_at: data.session.updated_at || new Date().toISOString(),
+        }
+        await fetchSessionDetail(imported)
       }
     } catch {
       setImportError('导入失败')
@@ -161,7 +207,11 @@ export default function SessionsPage() {
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr)
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return (
+      date.toLocaleDateString() +
+      ' ' +
+      date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    )
   }
 
   return (
@@ -191,8 +241,8 @@ export default function SessionsPage() {
         {importOpen && (
           <div className="p-4 border-b border-border bg-card/40 space-y-3">
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              支持 <code className="text-[10px]">## User</code> / <code className="text-[10px]">## Assistant</code>、
-              <code className="text-[10px]">用户/助手</code>、<code className="text-[10px]">**User**:</code> 等 Markdown 对话格式。
+              支持 <code className="text-[10px]">## User</code> / <code className="text-[10px]">## Assistant</code>
+              等 Markdown 对话格式。
             </p>
             <input
               value={importTitle}
@@ -211,7 +261,13 @@ export default function SessionsPage() {
               className="w-full px-2 py-2 bg-card border border-border rounded-md text-[12px] font-mono resize-y"
             />
             <div className="flex flex-wrap gap-2">
-              <input ref={fileRef} type="file" accept=".md,.markdown,text/markdown" className="hidden" onChange={onPickFile} />
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".md,.markdown,text/markdown"
+                className="hidden"
+                onChange={onPickFile}
+              />
               <button
                 onClick={() => fileRef.current?.click()}
                 className="h-8 px-3 text-[12px] border border-border rounded-md hover:bg-accent"
@@ -246,9 +302,6 @@ export default function SessionsPage() {
                     </span>
                   </div>
                 ))}
-                {preview.messages.length > 8 && (
-                  <div className="px-2 py-1 text-[11px] text-muted-foreground">…还有 {preview.messages.length - 8} 条</div>
-                )}
               </div>
             )}
           </div>
@@ -257,18 +310,13 @@ export default function SessionsPage() {
         <div className="divide-y divide-border">
           {sessions.length === 0 ? (
             <div className="p-8 text-center">
-              <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center mx-auto mb-3">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#71717a" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-              </div>
               <p className="text-[13px] text-muted-foreground">暂无会话，可导入 Markdown 对话记录</p>
             </div>
           ) : (
             sessions.map((session) => (
               <div
                 key={session.id}
-                onClick={() => fetchSessionDetail(session.id)}
+                onClick={() => void fetchSessionDetail(session)}
                 className={`p-4 cursor-pointer hover:bg-accent/50 transition-colors ${
                   selectedSession === session.id ? 'bg-accent' : ''
                 }`}
@@ -283,7 +331,16 @@ export default function SessionsPage() {
                   <span>{session.message_count} messages</span>
                   <span>·</span>
                   <span>{session.platform}</span>
+                  {session.active_run_status && (
+                    <>
+                      <span>·</span>
+                      <span className="text-amber-600">{session.active_run_status}</span>
+                    </>
+                  )}
                 </div>
+                {session.preview && (
+                  <p className="text-[11px] text-muted-foreground/80 mt-1 line-clamp-2">{session.preview}</p>
+                )}
                 <p className="text-[11px] text-muted-foreground/60 mt-1">{formatDate(session.updated_at)}</p>
               </div>
             ))
@@ -293,17 +350,28 @@ export default function SessionsPage() {
 
       {selectedSession && (
         <div className="flex-1 flex flex-col">
-          <div className="p-4 border-b border-border flex items-center justify-between">
+          <div className="p-4 border-b border-border flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-foreground">Session Detail</h3>
-            <button
-              onClick={() => {
-                setSelectedSession(null)
-                setMessages([])
-              }}
-              className="text-[12px] text-muted-foreground hover:text-foreground"
-            >
-              Close
-            </button>
+            <div className="flex items-center gap-2">
+              {selectedMeta && (
+                <button
+                  onClick={() => continueSession(selectedMeta)}
+                  className="h-8 px-3 text-[12px] bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                >
+                  {selectedMeta.platform === 'coder' ? '在 Coder 继续' : '在 Chat 继续'}
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setSelectedSession(null)
+                  setSelectedMeta(null)
+                  setMessages([])
+                }}
+                className="text-[12px] text-muted-foreground hover:text-foreground"
+              >
+                Close
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-auto p-4 space-y-3">
@@ -335,6 +403,9 @@ export default function SessionsPage() {
                       </div>
                     ) : (
                       <p className="text-[13px] whitespace-pre-wrap">{msg.content}</p>
+                    )}
+                    {msg.tool_steps && msg.tool_steps.length > 0 && (
+                      <ToolStepCard messageId={msg.id} steps={msg.tool_steps} defaultOpen={false} />
                     )}
                   </div>
                 </div>

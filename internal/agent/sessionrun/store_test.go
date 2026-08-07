@@ -141,4 +141,8 @@ func TestLatestRunAndCollectToolSteps(t *testing.T) {
 	if err != nil || len(steps) != 2 || steps[1]["tool"] != "write_file" {
 		t.Fatalf("steps=%v err=%v", steps, err)
 	}
+	listed, err := st.ListRunsForSession("s1")
+	if err != nil || len(listed) != 1 || listed[0].ID != run.ID {
+		t.Fatalf("list=%v err=%v", listed, err)
+	}
 }
