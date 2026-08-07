@@ -169,6 +169,7 @@ func (rt *sessionRunRuntime) execute(ctx context.Context, run *sessionrun.Run) e
 			ToolResultKeepRecent: rt.cfg.Agent.ToolResultKeepRecent,
 			ContextBudgetTokens:  rt.cfg.Agent.ContextBudgetTokens,
 			ContextCompactRatio:  rt.cfg.Agent.ContextCompactRatio,
+			ContextTargetRatio:   rt.cfg.Agent.ContextTargetRatio,
 			ParallelReadonly:     rt.cfg.Agent.ParallelReadonlyTools,
 			PromptCacheKey:       "cg-session-" + run.SessionID,
 			EnablePromptCache:    rt.cfg.Agent.PromptCacheEnabled,

@@ -2,13 +2,15 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 
 	"github.com/alex/codegateway/internal/agent/promptctx"
+	"github.com/alex/codegateway/internal/agentcore"
+	"github.com/alex/codegateway/internal/agentlink"
+	"github.com/alex/codegateway/internal/agentruntime"
+	"github.com/alex/codegateway/internal/agenttool"
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
@@ -26,18 +28,19 @@ type AgentEvent struct {
 }
 
 type coderOptions struct {
-	Temperature            float64
-	MaxTokens              int
-	MaxIterations          int
-	ToolResultMaxChars     int
-	ToolResultKeepRecent   int
-	ContextBudgetTokens    int
-	ContextCompactRatio    float64
-	ParallelReadonly       bool
-	PromptCacheKey         string
-	EnablePromptCache      bool
-	ToolLimits             tool.ToolLimits
-	OnEvent                func(AgentEvent)
+	Temperature          float64
+	MaxTokens            int
+	MaxIterations        int
+	ToolResultMaxChars   int
+	ToolResultKeepRecent int
+	ContextBudgetTokens  int
+	ContextCompactRatio  float64
+	ContextTargetRatio   float64
+	ParallelReadonly     bool
+	PromptCacheKey       string
+	EnablePromptCache    bool
+	ToolLimits           tool.ToolLimits
+	OnEvent              func(AgentEvent)
 	// InjectPending is called before each LLM request (after tools) to append mid-run user context.
 	InjectPending func() []provider.Message
 	// ShouldCancel returns true when the durable run was cancelled.
@@ -58,16 +61,16 @@ func runCoderAgent(
 	if opt.MaxTokens <= 0 {
 		opt.MaxTokens = 4096
 	}
-
-	registry := tool.NewChrootedRegistry(ws.RootPath, opt.ToolLimits)
-	tools := toProviderTools(registry)
-	toolsCost := promptctx.EstimateToolsSchema(tools)
-
-	messages := make([]provider.Message, len(seed))
-	copy(messages, seed)
-	if len(messages) == 0 {
+	if len(seed) == 0 {
 		return "", provider.Usage{}, nil, false, fmt.Errorf("empty coder seed messages")
 	}
+
+	chroot := tool.NewChrootedRegistry(ws.RootPath, opt.ToolLimits)
+	toolReg := agenttool.NewToolRegistry()
+	if err := agentlink.RegisterChrootTools(toolReg, chroot); err != nil {
+		return "", provider.Usage{}, nil, false, err
+	}
+	agentTools := agentlink.AgentToolsFromChroot(chroot)
 
 	var usage provider.Usage
 	var steps []map[string]string
@@ -78,197 +81,128 @@ func runCoderAgent(
 			opt.OnEvent(ev)
 		}
 	}
-	appendProcess := func(text string) {
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return
+
+	// Tool clipping (CG): shrink tool payloads on the seed. Session-level
+	// overflow is handled mid-loop by pigo compaction, not EnsureWithinBudget.
+	seedCopy := make([]provider.Message, len(seed))
+	copy(seedCopy, seed)
+	promptctx.CompactToolMessages(seedCopy, opt.ToolResultKeepRecent, opt.ToolResultMaxChars)
+
+	msgs := agentlink.MessagesFromProvider(seedCopy)
+	if opt.InjectPending != nil {
+		if extra := opt.InjectPending(); len(extra) > 0 {
+			msgs = append(msgs, agentlink.MessagesFromProvider(extra)...)
 		}
-		if processOut.Len() > 0 {
-			processOut.WriteString("\n\n")
-		}
-		processOut.WriteString(text)
-		emit(AgentEvent{Type: "delta", Content: text + "\n\n"})
+	}
+	agentCtx := &agentcore.AgentContext{
+		SystemPrompt: agentlink.ExtractSystemPrompt(seedCopy),
+		Messages:     msgs,
+		Tools:        agentTools,
 	}
 
-	for i := 0; i < opt.MaxIterations; i++ {
-		if opt.ShouldCancel != nil && opt.ShouldCancel() {
-			err := fmt.Errorf("cancelled")
-			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return processOut.String(), usage, steps, didCompact, err
-		}
-		if opt.InjectPending != nil {
-			if extra := opt.InjectPending(); len(extra) > 0 {
-				messages = append(messages, extra...)
+	onUsage := func(u provider.Usage) { usage.Add(u) }
+	streamOpt := agentlink.StreamOptions{
+		Provider:       prov,
+		Temperature:    opt.Temperature,
+		MaxTokens:      opt.MaxTokens,
+		PromptCacheKey: opt.PromptCacheKey,
+		EnableCache:    opt.EnablePromptCache,
+		MaxStreamCalls: opt.MaxIterations,
+		ShouldCancel:   opt.ShouldCancel,
+		OnUsage:        onUsage,
+	}
+	streamFn := agentlink.NewStreamFn(streamOpt)
+	// Summarization must not consume the coder iteration budget.
+	summaryOpt := streamOpt
+	summaryOpt.MaxStreamCalls = 0
+	summaryFn := agentlink.NewStreamFn(summaryOpt)
+
+	contextWindow, compactSettings := agentlink.CompactionSettingsFromBudget(
+		opt.ContextBudgetTokens,
+		opt.ContextCompactRatio,
+		opt.ContextTargetRatio,
+	)
+
+	cfg := agentruntime.RunConfig{
+		LoopConfig: agentruntime.LoopConfig{
+			Model:         modelName,
+			Stream:        streamFn,
+			ConvertToLlm:  agentlink.ConvertToLlm,
+			ContextWindow: contextWindow,
+			Compaction:    compactSettings,
+			SummaryStream: summaryFn,
+		},
+		Batch: agenttool.BatchConfig{
+			ToolExecutorConfig: agenttool.ToolExecutorConfig{
+				Registry:       toolReg,
+				MaxResultBytes: opt.ToolResultMaxChars,
+			},
+			ForceSequential: !opt.ParallelReadonly,
+		},
+		PrepareNextTurn: func(ctx context.Context, ac *agentcore.AgentContext) *agentruntime.TurnUpdate {
+			agentlink.CompactToolResults(ac.Messages, opt.ToolResultKeepRecent, opt.ToolResultMaxChars)
+			return nil
+		},
+		GetSteeringMessages: func(ctx context.Context) []agentcore.AgentMessage {
+			if opt.ShouldCancel != nil && opt.ShouldCancel() {
+				return nil
+			}
+			if opt.InjectPending == nil {
+				return nil
+			}
+			extra := opt.InjectPending()
+			if len(extra) == 0 {
+				return nil
+			}
+			return agentlink.MessagesFromProvider(extra)
+		},
+		SessionID: ws.ID,
+	}
+
+	loopStream := agentruntime.StartRun(ctx, agentCtx, cfg)
+	bridge := agentlink.EventBridge{}
+	var runErr error
+	for ev := range loopStream.Events() {
+		for _, ui := range bridge.Handle(ev) {
+			switch ui.Type {
+			case "delta":
+				if strings.TrimSpace(ui.Content) != "" {
+					processOut.WriteString(ui.Content)
+					emit(AgentEvent{Type: "delta", Content: ui.Content})
+				}
+			case "tool_step":
+				if ui.Step != nil {
+					steps = append(steps, ui.Step)
+					log.Printf("[coder] tool=%s workspace=%s", ui.Step["tool"], ws.ID)
+					emit(AgentEvent{Type: "tool_step", Step: ui.Step})
+				}
+			case "error":
+				runErr = fmt.Errorf("%s", ui.Content)
+				emit(AgentEvent{Type: "error", Content: ui.Content})
 			}
 		}
-
-		compacted, berr := promptctx.EnsureWithinBudget(
-			messages,
-			opt.ContextBudgetTokens,
-			opt.ContextCompactRatio,
-			opt.ToolResultKeepRecent,
-			opt.ToolResultMaxChars,
-			toolsCost,
-		)
-		if compacted {
+		if ce, ok := ev.(agentcore.CompactionEvent); ok && ce.ErrorMessage == "" {
 			didCompact = true
 		}
-		if berr != nil {
-			emit(AgentEvent{Type: "error", Content: berr.Error()})
-			return processOut.String(), usage, steps, didCompact, berr
-		}
-
-		temp := opt.Temperature
-		mt := opt.MaxTokens
-		req := &provider.ChatCompletionRequest{
-			Model:       modelName,
-			Messages:    messages,
-			Temperature: &temp,
-			MaxTokens:   &mt,
-			Tools:       tools,
-		}
-		if opt.EnablePromptCache {
-			provider.ApplyPromptCache(req, opt.PromptCacheKey)
-		}
-
-		resp, err := prov.ChatCompletion(ctx, req)
-		if err != nil {
-			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return processOut.String(), usage, steps, didCompact, err
-		}
-
-		usage.Add(resp.Usage)
-
-		if len(resp.Choices) == 0 {
-			err := fmt.Errorf("empty model response")
-			emit(AgentEvent{Type: "error", Content: err.Error()})
-			return processOut.String(), usage, steps, didCompact, err
-		}
-
-		msg := resp.Choices[0].Message
-		visible := msg.VisibleText()
-		if len(msg.ToolCalls) == 0 {
-			if visible != "" {
-				appendProcess(visible)
-			}
-			return strings.TrimSpace(processOut.String()), usage, steps, didCompact, nil
-		}
-
-		// Intermediate thinking / narration before tool calls — surface to the UI fully.
-		if visible != "" {
-			appendProcess(visible)
-		}
-
-		messages = append(messages, msg)
-
-		toolMsgs, newSteps := executeToolCalls(ctx, registry, msg.ToolCalls, opt.ToolResultMaxChars, opt.ParallelReadonly, ws.ID, emit)
-		steps = append(steps, newSteps...)
-		messages = append(messages, toolMsgs...)
+	}
+	if _, err := loopStream.Result(ctx); err != nil && runErr == nil {
+		runErr = err
+	}
+	if opt.ShouldCancel != nil && opt.ShouldCancel() && runErr == nil {
+		runErr = fmt.Errorf("cancelled")
 	}
 
-	err := fmt.Errorf("max tool iterations reached; try a more specific request")
-	emit(AgentEvent{Type: "error", Content: err.Error()})
 	out := strings.TrimSpace(processOut.String())
+	if out == "" && runErr != nil {
+		out = runErr.Error()
+	}
+	// Prefer the last assistant text from the context if streaming missed it.
 	if out == "" {
-		out = err.Error()
-	}
-	return out, usage, steps, didCompact, err
-}
-
-func executeToolCalls(
-	ctx context.Context,
-	registry *tool.ToolRegistry,
-	calls []provider.ToolCall,
-	toolResultMaxChars int,
-	parallelReadonly bool,
-	workspaceID string,
-	emit func(AgentEvent),
-) ([]provider.Message, []map[string]string) {
-	type result struct {
-		idx     int
-		msg     provider.Message
-		step    map[string]string
-	}
-
-	runOne := func(i int, tc provider.ToolCall) result {
-		args := map[string]interface{}{}
-		raw := tc.Function.Arguments
-		if raw == "" && tc.Function.Parameters != nil {
-			b, _ := json.Marshal(tc.Function.Parameters)
-			raw = string(b)
-		}
-		if raw != "" {
-			_ = json.Unmarshal([]byte(raw), &args)
-		}
-
-		t, err := registry.Get(tc.Function.Name)
-		content := ""
-		if err != nil {
-			content = fmt.Sprintf("Error: %v", err)
-		} else {
-			out, herr := t.Handler(ctx, args)
-			if herr != nil {
-				content = fmt.Sprintf("%s\nError: %v", out, herr)
-			} else {
-				content = out
-			}
-		}
-		modelContent := promptctx.TruncateToolResult(content, toolResultMaxChars)
-		step := map[string]string{
-			"tool":   tc.Function.Name,
-			"args":   raw,
-			// UI gets the full tool output; model context still uses TruncateToolResult above.
-			"result": content,
-		}
-		log.Printf("[coder] tool=%s workspace=%s", tc.Function.Name, workspaceID)
-		return result{
-			idx: i,
-			msg: provider.Message{
-				Role:       "tool",
-				Content:    modelContent,
-				ToolCallID: tc.ID,
-			},
-			step: step,
+		if last := agentcore.LastAssistantOf(agentCtx.Messages); last != nil {
+			out = strings.TrimSpace(agentcore.ContentToText(last.Content))
 		}
 	}
-
-	allReadonly := parallelReadonly && len(calls) > 1
-	if allReadonly {
-		for _, tc := range calls {
-			if !tool.IsReadOnly(tc.Function.Name) {
-				allReadonly = false
-				break
-			}
-		}
-	}
-
-	results := make([]result, len(calls))
-	if allReadonly {
-		var wg sync.WaitGroup
-		for i, tc := range calls {
-			wg.Add(1)
-			go func(i int, tc provider.ToolCall) {
-				defer wg.Done()
-				results[i] = runOne(i, tc)
-			}(i, tc)
-		}
-		wg.Wait()
-	} else {
-		for i, tc := range calls {
-			results[i] = runOne(i, tc)
-		}
-	}
-
-	msgs := make([]provider.Message, 0, len(results))
-	steps := make([]map[string]string, 0, len(results))
-	for _, r := range results {
-		msgs = append(msgs, r.msg)
-		steps = append(steps, r.step)
-		if emit != nil {
-			emit(AgentEvent{Type: "tool_step", Step: r.step})
-		}
-	}
-	return msgs, steps
+	return out, usage, steps, didCompact, runErr
 }
 
 func toProviderTools(registry *tool.ToolRegistry) []provider.Tool {
