@@ -19,8 +19,10 @@ type OpenAIProvider struct {
 
 // NewOpenAIProvider creates a new OpenAI provider
 func NewOpenAIProvider(config *ProviderConfig) *OpenAIProvider {
+	cfg := *config
+	cfg.BaseURL = NormalizeOpenAICompatibleBaseURL(cfg.BaseURL)
 	return &OpenAIProvider{
-		config: config,
+		config: &cfg,
 		client: &http.Client{},
 	}
 }
@@ -41,7 +43,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/chat/completions", p.config.BaseURL)
+	url := JoinOpenAIURL(p.config.BaseURL, "chat/completions")
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -60,7 +62,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatCompletion
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, NewProviderError(resp.StatusCode, resp.Header, bodyBytes)
+		return nil, wrapUpstreamError(url, resp.StatusCode, resp.Header, bodyBytes)
 	}
 
 	var result ChatCompletionResponse
@@ -86,7 +88,7 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/chat/completions", p.config.BaseURL)
+	url := JoinOpenAIURL(p.config.BaseURL, "chat/completions")
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -106,7 +108,7 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, NewProviderError(resp.StatusCode, resp.Header, bodyBytes)
+		return nil, wrapUpstreamError(url, resp.StatusCode, resp.Header, bodyBytes)
 	}
 
 	chunks := make(chan *ChatCompletionChunk, 100)
@@ -152,7 +154,7 @@ func (p *OpenAIProvider) ChatCompletionStream(ctx context.Context, req *ChatComp
 
 // ListModels returns available models
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
-	url := fmt.Sprintf("%s/models", p.config.BaseURL)
+	url := JoinOpenAIURL(p.config.BaseURL, "models")
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -167,7 +169,8 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error (status %d)", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, wrapUpstreamError(url, resp.StatusCode, resp.Header, bodyBytes)
 	}
 
 	var result struct {

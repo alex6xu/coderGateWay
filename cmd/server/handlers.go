@@ -1410,6 +1410,11 @@ func sessionOwnedBy(database *db.DB, sessionID string, accountID int64) bool {
 }
 
 func findChannelForModel(database *db.DB, accountID int64, modelName string) (*model.Channel, error) {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return findAnyChannel(database, accountID)
+	}
+
 	rows, err := database.Query(`
 		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status, COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
 		FROM channels WHERE status = 1 AND user_id = ? ORDER BY priority DESC, weight DESC
@@ -1429,8 +1434,11 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 			continue
 		}
 		ch.UserID = &userID
+		if !channelUsableForAPI(&ch) {
+			continue
+		}
 
-		if ch.Models == "" {
+		if strings.TrimSpace(ch.Models) == "" {
 			chCopy := ch
 			matches = append(matches, &chCopy)
 			continue
@@ -1459,6 +1467,25 @@ func findChannelForModel(database *db.DB, accountID int64, modelName string) (*m
 	return matches[0], nil
 }
 
+// channelUsableForAPI skips deprecated / unusable rows (e.g. legacy MiMo Free type 7
+// with an empty key) so agent chat cannot route to them.
+func channelUsableForAPI(ch *model.Channel) bool {
+	if ch == nil || ch.Status != 1 {
+		return false
+	}
+	// Legacy "MiMo Free" channel type (7) is no longer supported.
+	if ch.Type == 7 {
+		return false
+	}
+	auth := strings.ToLower(strings.TrimSpace(ch.AuthMode))
+	if auth == "" || auth == "api_key" {
+		if strings.TrimSpace(ch.Key) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func createProviderFromChannel(channel *model.Channel) (provider.Provider, error) {
 	providerCfg := &provider.ProviderConfig{
 		Name:     channel.Name,
@@ -1469,6 +1496,13 @@ func createProviderFromChannel(channel *model.Channel) (provider.Provider, error
 	}
 	if providerCfg.BaseURL == "" {
 		providerCfg.BaseURL = getDefaultBaseURL(channel.Type)
+	}
+	// OpenAI-compatible channels often omit /v1; normalize before dialing upstream.
+	switch providerCfg.Type {
+	case provider.ProviderTypeOpenAI, provider.ProviderTypeDeepSeek, provider.ProviderTypeMiMo,
+		provider.ProviderTypeAgnes, provider.ProviderTypeGLM, provider.ProviderTypeCustom,
+		provider.ProviderTypeOllama:
+		providerCfg.BaseURL = provider.NormalizeOpenAICompatibleBaseURL(providerCfg.BaseURL)
 	}
 	if strings.EqualFold(channel.AuthMode, "oauth") && channel.Type == model.ChannelTypeClaude {
 		if claudeOAuthSvc == nil || !claudeOAuthSvc.Configured() {
@@ -1520,21 +1554,33 @@ func buildAgentMessages(channel *model.Channel, modelName, userMessage, mode str
 }
 
 func findAnyChannel(database *db.DB, accountID int64) (*model.Channel, error) {
-	var ch model.Channel
-	var userID int64
-	err := database.QueryRow(`
+	rows, err := database.Query(`
 		SELECT id, user_id, name, type, key, COALESCE(base_url, ''), COALESCE(models, ''), weight, priority, status,
 		       COALESCE(is_default, 0), COALESCE(auth_mode, 'api_key')
-		FROM channels WHERE status = 1 AND user_id = ? ORDER BY is_default DESC, priority DESC, weight DESC LIMIT 1
-	`, accountID).Scan(
-		&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status,
-		&ch.IsDefault, &ch.AuthMode,
-	)
+		FROM channels WHERE status = 1 AND user_id = ?
+		ORDER BY is_default DESC, priority DESC, weight DESC
+	`, accountID)
 	if err != nil {
 		return nil, err
 	}
-	ch.UserID = &userID
-	return &ch, nil
+	defer rows.Close()
+
+	for rows.Next() {
+		var ch model.Channel
+		var userID int64
+		if err := rows.Scan(
+			&ch.ID, &userID, &ch.Name, &ch.Type, &ch.Key, &ch.BaseURL, &ch.Models, &ch.Weight, &ch.Priority, &ch.Status,
+			&ch.IsDefault, &ch.AuthMode,
+		); err != nil {
+			continue
+		}
+		ch.UserID = &userID
+		if !channelUsableForAPI(&ch) {
+			continue
+		}
+		return &ch, nil
+	}
+	return nil, fmt.Errorf("no available channel")
 }
 
 func getProviderType(channelType int) provider.ProviderType {

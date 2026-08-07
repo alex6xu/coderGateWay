@@ -81,8 +81,15 @@ export function useSessionRestore() {
       const saved = resolveSessionId(opts)
       if (!saved) return null
 
-      const res = await apiFetch(`/v1/agent/sessions/${saved}`, {}, opts.accountId)
-      if (!res.ok || gen !== genRef.current) return null
+      const res = await apiFetch(`/v1/agent/sessions/${encodeURIComponent(saved)}`, {}, opts.accountId)
+      if (gen !== genRef.current) return null
+      if (!res.ok) {
+        // Stale localStorage / ?session= ids produce noisy 404s on every Chat mount.
+        if (res.status === 404 || res.status === 403) {
+          clearPersistedSession(opts.storageKey)
+        }
+        return null
+      }
       const data = (await res.json()) as SessionRestorePayload
       if (gen !== genRef.current) return null
 
@@ -135,7 +142,7 @@ export function useSessionRestore() {
         workspaceId,
       }
     },
-    [persistSessionId, resolveSessionId],
+    [clearPersistedSession, persistSessionId, resolveSessionId],
   )
 
   const isCurrentGeneration = useCallback((gen: number) => gen === genRef.current, [])

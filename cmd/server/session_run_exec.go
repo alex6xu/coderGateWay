@@ -13,6 +13,7 @@ import (
 	sessionrun "github.com/alex/codegateway/internal/agent/sessionrun"
 	"github.com/alex/codegateway/internal/config"
 	"github.com/alex/codegateway/internal/db"
+	"github.com/alex/codegateway/internal/model"
 	"github.com/alex/codegateway/internal/provider"
 	"github.com/alex/codegateway/internal/tool"
 	"github.com/alex/codegateway/internal/workspace"
@@ -66,15 +67,22 @@ func (rt *sessionRunRuntime) execute(ctx context.Context, run *sessionrun.Run) e
 		return err
 	}
 
-	modelName := run.Model
-	channel, err := findChannelForModel(rt.database, run.UserID, modelName)
-	if channel == nil || err != nil {
+	modelName := strings.TrimSpace(run.Model)
+	var channel *model.Channel
+	var err error
+	if modelName == "" {
+		// Chat UI often omits model; prefer the account default channel.
 		channel, err = findAnyChannel(rt.database, run.UserID)
-		if err != nil {
-			rt.emit(run, sessionrun.EventError, AgentEvent{Content: "no available channel"})
-			_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, "no available channel")
-			return err
+	} else {
+		channel, err = findChannelForModel(rt.database, run.UserID, modelName)
+		if channel == nil || err != nil {
+			channel, err = findAnyChannel(rt.database, run.UserID)
 		}
+	}
+	if channel == nil || err != nil {
+		rt.emit(run, sessionrun.EventError, AgentEvent{Content: "no available channel"})
+		_ = rt.store.Finish(run.ID, sessionrun.StatusFailed, "no available channel")
+		return err
 	}
 	modelName = resolveModelForChannel(channel, modelName)
 	run.Model = modelName

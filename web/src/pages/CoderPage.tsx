@@ -265,10 +265,24 @@ export default function CoderPage() {
         let workspaceFromSession = ''
         if (sessionFromUrl && currentAccount?.id) {
           try {
-            const sessRes = await apiFetch(`/v1/agent/sessions/${sessionFromUrl}`, {}, currentAccount.id)
+            const sessRes = await apiFetch(
+              `/v1/agent/sessions/${encodeURIComponent(sessionFromUrl)}`,
+              {},
+              currentAccount.id,
+            )
             if (sessRes.ok) {
               const sessData = await sessRes.json()
-              workspaceFromSession = sessData.workspace_id || sessData.active_run?.workspace_id || sessData.latest_run?.workspace_id || ''
+              workspaceFromSession =
+                sessData.workspace_id ||
+                sessData.active_run?.workspace_id ||
+                sessData.latest_run?.workspace_id ||
+                ''
+            } else if (sessRes.status === 404) {
+              // Drop stale ?session= so Chat/Coder stop refetching a missing id.
+              const url = new URL(window.location.href)
+              url.searchParams.delete('session')
+              url.searchParams.delete('resume')
+              window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
             }
           } catch {
             /* ignore */

@@ -15,13 +15,29 @@ type ProviderError struct {
 	StatusCode int
 	Header     http.Header
 	Body       string
+	URL        string
 }
 
 func (e *ProviderError) Error() string {
 	if e == nil {
 		return "provider error"
 	}
-	return fmt.Sprintf("API error (status %d): %s", e.StatusCode, e.Body)
+	body := strings.TrimSpace(e.Body)
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "openresty") {
+		hint := "upstream returned HTML 404/error page — check channel Base URL (OpenAI-compatible APIs usually need .../v1, not the bare host)"
+		if e.URL != "" {
+			return fmt.Sprintf("API error (status %d) url=%s: %s", e.StatusCode, e.URL, hint)
+		}
+		return fmt.Sprintf("API error (status %d): %s", e.StatusCode, hint)
+	}
+	if len(body) > 500 {
+		body = body[:500] + "…"
+	}
+	if e.URL != "" {
+		return fmt.Sprintf("API error (status %d) url=%s: %s", e.StatusCode, e.URL, body)
+	}
+	return fmt.Sprintf("API error (status %d): %s", e.StatusCode, body)
 }
 
 // NewProviderError builds a ProviderError from an HTTP response's status,
@@ -32,6 +48,12 @@ func NewProviderError(statusCode int, header http.Header, body []byte) *Provider
 		Header:     header,
 		Body:       string(body),
 	}
+}
+
+func wrapUpstreamError(requestURL string, statusCode int, header http.Header, body []byte) *ProviderError {
+	err := NewProviderError(statusCode, header, body)
+	err.URL = requestURL
+	return err
 }
 
 // RetryAfter returns the upstream-suggested cooldown parsed from the

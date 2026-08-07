@@ -41,11 +41,28 @@ export function readSessionQueryParam(search = typeof window !== 'undefined' ? w
   }
 }
 
+/** Only write ?session= when continuing an existing conversation; avoid leaving
+ *  stale ids in the URL that cause restore 404 loops on next visit. */
 export function writeSessionQueryParam(sessionId: string) {
   try {
     const url = new URL(window.location.href)
-    if (sessionId) url.searchParams.set('session', sessionId)
-    else url.searchParams.delete('session')
+    const current = url.searchParams.get('session') || url.searchParams.get('resume') || ''
+    if (sessionId) {
+      // Keep URL in sync when already deep-linked or explicitly continuing.
+      if (current && current !== sessionId) {
+        url.searchParams.set('session', sessionId)
+        url.searchParams.delete('resume')
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+      } else if (current === sessionId) {
+        url.searchParams.delete('resume')
+        if (url.searchParams.has('resume')) {
+          window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+        }
+      }
+      // If there was no session query, do not inject one on every chat turn.
+      return
+    }
+    url.searchParams.delete('session')
     url.searchParams.delete('resume')
     window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
   } catch {

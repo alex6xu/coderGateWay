@@ -120,19 +120,31 @@ export default function ChatPage() {
     setIsLoading(true)
 
     try {
-      const response = await apiFetch(
-        '/v1/agent/chat',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            message: text,
-            session_id: sessionId,
-            stream: false,
-          }),
-        },
-        currentAccount?.id,
-      )
-      const data = await response.json()
+      const postChat = (sid: string) =>
+        apiFetch(
+          '/v1/agent/chat',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              message: text,
+              session_id: sid || undefined,
+              stream: false,
+            }),
+          },
+          currentAccount?.id,
+        )
+
+      let response = await postChat(sessionId)
+      let data = await response.json().catch(() => ({}))
+
+      // Stale session_id → 404; drop it and start a fresh session once.
+      if (response.status === 404 && sessionId) {
+        setSessionId('')
+        if (storageKey) clearPersistedSession(storageKey)
+        response = await postChat('')
+        data = await response.json().catch(() => ({}))
+      }
+
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
 
       if (data.session_id) {

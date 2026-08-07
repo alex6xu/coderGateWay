@@ -871,6 +871,10 @@ function ProvidersPage({ accountId }: { accountId?: number }) {
                   placeholder="https://api.openai.com/v1"
                   className="w-full h-9 px-3 bg-background border border-border rounded-lg text-[13px]"
                 />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  OpenAI 兼容接口需带版本路径，例如 <code className="text-[10px]">https://你的域名/v1</code>
+                  。只填主机名常会被上游 OpenResty 返回 HTML 404。
+                </p>
               </div>
 
               <div>
