@@ -44,11 +44,13 @@ CodeGateway 想解决的核心问题：**让"我和 AI 的关系"从一次性、
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| Agent 循环（LLM + 工具循环） | ✅ | `cmd/server/coder_agent.go`，最多 N 轮，检测并执行工具调用 |
+| Agent 循环（LLM + 工具循环） | ✅ | `cmd/server/coder_agent.go`，最多 N 轮（`agent.max_iterations`），检测并执行工具调用 |
 | 工具系统（chroot 沙箱） | ✅ | `bash · read_file · write_file · list_directory · search_files · grep`，限制在工作区根目录 |
 | 云端工作区 | ✅ | Code 页上传本地目录到云端，Agent 在隔离目录读写 |
+| GitHub clone / pull / push | ✅ | Code 工作区对接远程仓库 |
 | 后台长程任务 | ✅ | 任务 worker + REST 提交/轮询（`POST /v1/agent/tasks`、`GET .../:id`），重启可恢复 |
-| 并行只读工具 · prompt 缓存 · 流式事件 | ✅ | agent 循环内置 |
+| 并行只读工具 · prompt 缓存 · 流式事件 | ✅ | agent 循环内置；thinking/reasoning 可展示 |
+| 工具循环超限处理 | 🚧 | 触顶报 `max tool iterations reached`；缺优雅收束 / 续跑 / 用户可配提示（见 TODO） |
 | `edit` / `apply_patch` 增量编辑 | 📋 | 目前 write 为整文件覆盖 |
 | 子 Agent（Actor 模式） | 📋 | `internal/agent/actor/` 已有骨架但**零调用者**，未接入 |
 
@@ -63,6 +65,7 @@ CodeGateway 想解决的核心问题：**让"我和 AI 的关系"从一次性、
 | 对话分类打标 | ✅ | `question_tags` / `message_tags`，**关键词/正则**分类 |
 | LLM 摘要（非截断折叠） | 🚧 | 当前折叠为**截断式**（拼接消息行），非 LLM 摘要 |
 | 短期/长期记忆显式分层 | 🚧 | 目前靠 `type='checkpoint'` 隐式区分，无显式冷热分层 |
+| 本地知识图谱 / 向量库 | 📋 | 规划接入 graphify / Obsidian / sqlite-vec 等（见 TODO） |
 | 定时自主整理 | 📋 | Cron 调度器 `calculateNextRun` 为 stub 且未接入 |
 
 ### 多端接入 / Multi-Client
@@ -72,6 +75,9 @@ CodeGateway 想解决的核心问题：**让"我和 AI 的关系"从一次性、
 | Web（React + TS + Tailwind） | ✅ | Chat / Coder / Sessions / Tags / Tasks / Channels / Accounts 等页面 |
 | WebSocket 实时对话 | ✅ | `/ws`，流式 chat |
 | 跨端查看任务进度 | ✅ | 任一客户端提交的任务可被任意认证客户端轮询（DB 共享状态） |
+| 页面导航后恢复会话 | ✅ | Code/Chat 用 localStorage 记住当前 workspace/session，并重连进行中的 run |
+| **切换会话后恢复完整内容** | 🚧 | 切换到另一会话时，消息 / 工具步骤 / 进行中 run 的还原仍不完整（见 TODO） |
+| Channels 请求日志 | ✅ | 网关管理页「请求日志」Tab，审计 LLM 请求/响应 |
 | 边缘端看**实时步骤** | 🚧 | 任务 worker 不推 WebSocket，跨端只能轮询终态，看不到实时步骤流 |
 | 移动端 / 响应式 | 🚧 | 桌面优先，响应式适配极少 |
 | Telegram Bot | 📋 | 仅 config struct，无接线（`internal/platform/` 为死代码） |
@@ -148,7 +154,7 @@ cd web && npm run build                # 生产构建 → web/dist
 
 ### 配置 / Configuration
 
-编辑 `codegateway.yaml`：
+编辑 `codegateway.yaml`。Agent 相关常用项：
 
 ```yaml
 server:
@@ -159,6 +165,14 @@ database:
   driver: "sqlite"
   dsn: "./data/codegateway.db"
 
+agent:
+  # LLM↔工具循环的最大轮次（每轮可含多个并行工具调用）
+  # 简单问答 8–12；一般改代码 20–32；大范围探索 40–50
+  # 触顶会报: max tool iterations reached
+  max_iterations: 24
+  max_tokens: 4096
+  context_budget_tokens: 8000
+
 gateway:
   enabled: true
   routing:
@@ -168,6 +182,8 @@ platforms:
   web:
     enabled: true
 ```
+
+> `max_iterations` 是 **LLM 轮次**，不是工具调用总次数。额度越大，耗时与费用越高；若模型在空转（反复读同一文件），加额度不如把任务说得更具体。
 
 ---
 
@@ -259,6 +275,8 @@ codegateway/
 
 ### 近期 / Near-term（打磨已有雏形）
 
+- **[会话] 切换会话后完整恢复内容** — 在会话列表切换时还原消息、工具步骤、进行中 run 的 SSE；与「页面导航恢复」互补。
+- **[Agent] 工具循环超限体验** — 默认额度调到合适区间；触顶时给出可续跑/摘要收束，而不是硬失败。
 - **[记忆] LLM 摘要替代截断折叠** — 把 checkpoint 折叠从"拼接消息行"升级为真正的 LLM 摘要，显著提升长期记忆质量。
 - **[记忆] 显式短期/长期分层** — 引入冷热分层与"记忆晋升"机制，明确 context 搬运策略。
 - **[Agent] `edit` / `apply_patch` 工具** — 从整文件覆盖升级为增量编辑，减少 token 与出错面。
@@ -267,6 +285,7 @@ codegateway/
 
 ### 中期 / Mid-term（补齐愿景关键项）
 
+- **[知识库] 本地知识图谱 + 向量检索** — 在 FTS 之上叠加 sqlite-vec；探索 graphify / Obsidian 互通，形成可浏览的个人知识图。
 - **[定时] 落地 Cron 调度** — 实现真正的 cron 表达式解析并接入，支撑"定时自主整理"（每日摘要、记忆重组、知识库归档）。
 - **[网关] 格式转换 + Claude/Gemini 原生 endpoint** — 补全 `ConvertResponse`、Gemini provider、Claude messages endpoint。
 - **[多端] Telegram / 移动端** — 接入 Telegram bot，前端响应式适配移动端。
@@ -275,7 +294,6 @@ codegateway/
 ### 远期 / Long-term（放大愿景）
 
 - **[Agent] 子 Agent 调度** — 接入 Actor 模式，支持并行子任务分解。
-- **[知识库] 语义检索 / RAG** — 在 FTS 之上叠加向量检索，跨对话语义召回。
 - **[知识库] LLM 分类替代关键词** — 用 LLM 对对话做主题聚类与自动归档。
 - **[Agent] 自我进化** — 从使用模式中学习并沉淀技能。
 
@@ -283,14 +301,27 @@ codegateway/
 
 ## 待处理任务（技术债 / TODO）
 
-> 从代码库审计中提炼的可执行清单，供后续 session 直接认领。
+> 从代码库审计与近期使用反馈中提炼的可执行清单，供后续 session 直接认领。
 
-**清理 / 修复**
+### 优先待办（近期反馈）
+
+> 展开说明见 [`docs/todos-session-knowledge-tool-loop.md`](docs/todos-session-knowledge-tool-loop.md)。
+
+- [ ] **切换会话后恢复内容** — 页面导航恢复（localStorage + run 重连）已有；会话列表切换时仍需完整还原：历史消息、工具步骤面板、进行中/最近 run 事件流。涉及 `CoderPage` / `ChatPage`、session API、`sessionPersist`。
+- [ ] **构建本地知识库 / 知识图谱** — 在现有 FTS5 之上规划：sqlite-vec 向量检索、graphify 风格实体关系图、可选 Obsidian vault 导入/导出。目标：对话与代码上下文沉淀为可浏览、可检索的本地知识资产。
+- [ ] **工具调用循环超限** — 现状：触顶直接 `max tool iterations reached`。改进方向：
+  - 文档与默认值：一般改代码建议 `max_iterations: 24`～`32`（`codegateway.yaml` 已调至 24）
+  - 产品：触顶时返回已产生的过程输出 +「继续」续跑，或强制让模型基于已有工具结果做摘要收束
+  - 可观测：Channels「请求日志」已可审计每轮 LLM 调用，便于排查空转
+
+### 清理 / 修复
+
 - [ ] 清理死代码：`internal/agent/agent.go`、`internal/agent/actor/`、`internal/platform/`（Telegram/Web adapter 全无调用者）
 - [ ] 修复测试缺陷 `TestWorkerFailsTaskWhenOwnedWorkspaceCannotBeLoaded`（`worker_test.go:84`，缺 `ProviderForTask`+`Run` 配置，触发 fail-fast）
 - [ ] 网关核心零测试覆盖：`relay` / `relay/convert` / `relay/router` / `gateway/proxy` / `gateway/billing` 全部 `[no test files]`
 
-**功能落地**
+### 功能落地
+
 - [ ] Cron `calculateNextRun` 真实 cron 解析 + 接入 `cmd/server`（`cron.go:106`）
 - [ ] `ConvertResponse` 补全（`convert/converter.go:44`）
 - [ ] Gemini `ChatCompletion` 实现（`gemini.go:26`）

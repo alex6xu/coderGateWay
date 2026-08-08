@@ -16,7 +16,10 @@ redis:
 
 agent:
   default_model: ""
-  max_iterations: 12
+  # Max LLM↔tool rounds per agent run (each round may include multiple parallel tool calls).
+  # Guidance: simple Q&A 8–12; typical coding 20–32; large exploration 40–50.
+  # Hitting the cap returns: max tool iterations reached
+  max_iterations: 24
   # Completion / generation cap (not the full context window)
   max_tokens: 4096
   # Soft budget for prompt assembly (stable prefix + variable user suffix)
